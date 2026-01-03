@@ -1,4 +1,4 @@
-# monitor.py (full updated - keyword filtering removed)
+# monitor.py (full updated - BIG_TRADE_THRESHOLD lowered to $10K for more whale alerts)
 
 import requests
 import os
@@ -9,10 +9,10 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 
-# Config
-NEW_ACCOUNT_VALUE_THRESHOLD = Decimal(os.getenv("NEW_ACCOUNT_THRESHOLD", "5000"))
-ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "90"))
-BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "20000"))
+# Config - lowered BIG_TRADE_THRESHOLD to capture more big bets for copy-trading
+NEW_ACCOUNT_VALUE_THRESHOLD = Decimal(os.getenv("NEW_ACCOUNT_THRESHOLD", "10000"))  # $10K+ new accounts
+ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))
+BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "10000"))  # Changed to $10K+ (was $20K)
 MAX_OTHER_TRADES = 15
 SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "21"))
 WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "14"))
@@ -190,7 +190,7 @@ for trade in trades:
 
     tx_line = f"  Tx: https://polygonscan.com/tx/{tx_hash}\n" if tx_hash else ""
 
-    # Unified alert building (no keyword filtering - all big trades treated equally)
+    # Unified alert building (all big trades = high-signal)
     if value > NEW_ACCOUNT_VALUE_THRESHOLD and is_new:
         alert_text = (
             f"ALERT: Large new-account trade detected! [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}]\n\n"
@@ -211,12 +211,12 @@ for trade in trades:
             f"  Side: {trade.get('side')} {trade.get('size')} shares @ ${trade.get('price')}\n"
             f"{tx_line}"
         )
-        alerts.append(("HIGH", big_text))  # All big trades now high-signal
+        alerts.append(("HIGH", big_text))
 
     trade_ts = int(trade.get("timestamp", current_time))
     db_mark_trade(conn, trade_key, trade_ts)
 
-# Build email body (simplified - no low-priority section)
+# Build email body
 high_alerts = [text for prio, text in alerts if prio == "HIGH"]
 
 email_parts = []
