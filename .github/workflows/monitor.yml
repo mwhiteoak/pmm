@@ -15,7 +15,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .state
-          key: polymarket-state-${{ runner.os }}-${{ github.ref_name }}
+          key: polymarket-state-$$ {{ runner.os }}- $${{ github.ref_name }}
           restore-keys: |
             polymarket-state-${{ runner.os }}-
 
