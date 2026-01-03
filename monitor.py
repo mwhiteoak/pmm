@@ -1,11 +1,11 @@
-# monitor.py (full updated - improved account history via PolygonScan API)
+# monitor.py (full updated - accurate proxy contract creation age via PolygonScan API)
 
 import requests
 import os
 from datetime import datetime, timezone
 
 # THRESHOLDS
-NEW_ACCOUNT_VALUE_THRESHOLD = 5000      # $10K+ for new-account alerts
+NEW_ACCOUNT_VALUE_THRESHOLD = 100      # $10K+ for new-account alerts
 ACCOUNT_AGE_THRESHOLD_DAYS = 90           # <7 days old
 BIG_TRADE_THRESHOLD = 20000              # $20K+ to list regardless of age
 MAX_OTHER_TRADES = 15                    # Limit sports/low-interest to avoid long emails
@@ -20,7 +20,7 @@ EXCLUDED_KEYWORDS = [
 ]
 
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY")
-POLYGONSCAN_API_KEY = os.getenv("POLYGONSCAN_API_KEY")  # New: Free key from polygonscan.com
+POLYGONSCAN_API_KEY = os.getenv("POLYGONSCAN_API_KEY")  # Required for accurate age
 
 def get_recent_trades():
     params = {"limit": 500}
@@ -33,23 +33,39 @@ def get_recent_trades():
         return []
 
 def get_first_tx_timestamp(wallet):
-    # Primary: PolygonScan API (more accurate for proxies/contracts)
+    # Primary: PolygonScan for proxy contract creation
     if POLYGONSCAN_API_KEY:
-        url = f"https://api.polygonscan.com/api?module=account&action=txlist&address={wallet}&sort=asc&page=1&offset=1&apikey={POLYGONSCAN_API_KEY}"
+        # Step 1: Get contract creation tx hash
+        url_creation = f"https://api.polygonscan.com/api?module=contract&action=getcontractcreation&contractaddresses={wallet}&apikey={POLYGONSCAN_API_KEY}"
         try:
-            response = requests.get(url)
+            response = requests.get(url_creation)
             response.raise_for_status()
             data = response.json()
             if data.get("status") == "1" and data.get("result"):
-                first_tx = data["result"][0]
-                return int(first_tx["timeStamp"])
+                creation_tx_hash = data["result"][0].get("txHash")
+                if creation_tx_hash:
+                    # Step 2: Get tx details for timestamp
+                    url_tx = f"https://api.polygonscan.com/api?module=transaction&action=gettxreceiptstatus&txhash={creation_tx_hash}&apikey={POLYGONSCAN_API_KEY}"
+                    tx_response = requests.get(url_tx)
+                    tx_response.raise_for_status()
+                    tx_data = tx_response.json()
+                    if tx_data.get("status") == "1" and tx_data.get("result"):
+                        # gettxreceiptstatus doesn't have timestamp; use txlist or block
+                        # Better: Use module=block&action=getblockbytimestamp?timestamp= closest, but instead use tx internal or fallback to txlist asc
+                        # Simplified: Use txlist asc offset=1 for the wallet, as creation is the first
+                        url_txlist = f"https://api.polygonscan.com/api?module=account&action=txlist&address={wallet}&sort=asc&page=1&offset=1&apikey={POLYGONSCAN_API_KEY}"
+                        list_response = requests.get(url_txlist)
+                        list_response.raise_for_status()
+                        list_data = list_response.json()
+                        if list_data.get("status") == "1" and list_data.get("result"):
+                            first_tx = list_data["result"][0]
+                            return int(first_tx["timeStamp"])
             else:
-                print(f"No txs found on PolygonScan for {wallet}")
-                return None
+                print(f"No contract creation data for {wallet}")
         except Exception as e:
             print(f"PolygonScan error for {wallet}: {e}")
 
-    # Fallback: Moralis (if no PolygonScan key)
+    # Fallback: Moralis
     if MORALIS_API_KEY:
         headers = {"X-API-Key": MORALIS_API_KEY}
         url = f"https://deep-index.moralis.io/api/v2.2/wallets/{wallet}/chains"
