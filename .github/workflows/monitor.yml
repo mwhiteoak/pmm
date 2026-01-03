@@ -1,3 +1,5 @@
+# .github/workflows/monitor.yml (full updated - includes PolygonScan API key)
+
 name: Polymarket Monitor
 
 on:
@@ -23,6 +25,7 @@ jobs:
         run: python monitor.py
         env:
           MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
+          POLYGONSCAN_API_KEY: ${{ secrets.POLYGONSCAN_API_KEY }}  # Required for accurate account age
 
       - name: Send email if alerts
         if: env.ALERTS != ''
