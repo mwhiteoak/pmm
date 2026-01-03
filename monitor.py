@@ -1,34 +1,21 @@
 import requests
-import json
-import time
 import os
 from datetime import datetime
 
-# Configuration (adjust thresholds if needed)
+# Configuration
 POLYMARKET_TRADES_URL = "https://data-api.polymarket.com/trades"
-TRADE_VALUE_THRESHOLD = 100  # $10K
+TRADE_VALUE_THRESHOLD = 100  # $10K in USDC
 ACCOUNT_AGE_THRESHOLD_DAYS = 30
-SEEN_FILE = "seen_tx_hashes.json"  # Artifact file
 
-# Load secrets from environment
+# Load Moralis API key from secrets
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY")
-
-def load_seen_hashes():
-    if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
-
-def save_seen_hashes(hashes):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(list(hashes), f)
 
 def get_recent_trades():
     params = {"limit": 500}
     response = requests.get(POLYMARKET_TRADES_URL, params=params)
     if response.status_code == 200:
         return response.json()
-    print(f"Error fetching trades: {response.status_code}")
+    print(f"Error fetching trades: {response.status_code} {response.text}")
     return []
 
 def get_first_tx_timestamp(wallet):
@@ -39,13 +26,18 @@ def get_first_tx_timestamp(wallet):
     url = f"https://deep-index.moralis.io/api/v2.2/wallets/{wallet}/chains"
     params = {"chains": "0x89"}  # Polygon
     response = requests.get(url, headers=headers, params=params)
+    |
     if response.status_code == 200:
         data = response.json()
         for chain in data.get("active_chains", []):
             if chain.get("chain_id") == "0x89":
                 first_tx = chain.get("first_transaction", {}).get("block_timestamp")
                 if first_tx:
-                    return int(datetime.fromisoformat(first_tx.replace("Z", "+00:00")).timestamp())
+                    # Handle ISO format with Z
+                    ts_str = first_tx.replace("Z", "+00:00")
+                    return int(datetime.fromisoformat(ts_str).timestamp())
+    else:
+        print(f"Moralis error for wallet {wallet}: {response.status_code}")
     return None
 
 def format_alert(trade, value, age_days):
@@ -59,18 +51,16 @@ Market: {trade.get('title')}
 Account Age: {age_days:.2f} days
 Timestamp: {datetime.fromtimestamp(trade['timestamp'])}
 Tx Hash: {trade.get('transactionHash')}
+
+---
 """
 
-seen_hashes = load_seen_hashes()
+# Main execution
 trades = get_recent_trades()
-current_time = int(time.time())
+current_time = int(datetime.now().timestamp())
 alerts = []
 
 for trade in trades:
-    tx_hash = trade.get("transactionHash")
-    if tx_hash in seen_hashes:
-        continue
-
     size = float(trade.get("size", 0))
     price = float(trade.get("price", 0))
     value = size * price
@@ -82,14 +72,12 @@ for trade in trades:
             age_days = (current_time - first_ts) / 86400
             alerts.append(format_alert(trade, value, age_days))
 
-    seen_hashes.add(tx_hash)
-
-save_seen_hashes(seen_hashes)
-
-# Output alerts count for workflow (will be in logs)
+# Output alerts for email step
 if alerts:
+    full_alert = "".join(alerts)
     print(f"{len(alerts)} alert(s) found!")
+    print(full_alert)
     with open(os.environ["GITHUB_ENV"], "a") as f:
-        f.write(f"ALERTS={''.join(alerts)}")
+        f.write(f"ALERTS={full_alert}")
 else:
-    print("No alerts.")
+    print("No matching trades found.")
