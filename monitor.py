@@ -1,4 +1,4 @@
-# monitor.py (fixed - conn defined before use, safe DB unpack, full persistence)
+# monitor.py (full updated - keyword filtering removed)
 
 import requests
 import os
@@ -22,15 +22,6 @@ STATE_DIR = Path(os.getenv("STATE_DIR", ".state"))
 STATE_DIR.mkdir(exist_ok=True)
 DB_PATH = STATE_DIR / "polymarket_state.sqlite"
 
-# Sports/low-interest keywords
-EXCLUDED_KEYWORDS = [
-    "nba", "basketball", "college basketball", "ncaab", "ncaa basketball",
-    "soccer", "football", "premier league", "la liga", "serie a", "bundesliga",
-    "champions league", "world cup", "euro", "mls", "tennis", "golf", "ufc", "mma",
-    "cricket", "rugby", "hockey", "nhl", "baseball", "mlb", "f1", "formula 1",
-    "boxing", "wwe", "esports", "darts", "snooker", "cycling", "olympics"
-]
-
 # In-memory cache
 wallet_age_cache = {}
 
@@ -38,7 +29,7 @@ wallet_age_cache = {}
 session = requests.Session()
 session.headers.update({"User-Agent": "PolymarketMonitor/1.0"})
 
-# DB helpers (fixed safe unpack)
+# DB helpers
 def db_connect():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -79,7 +70,7 @@ def db_get_wallet_first_ts(conn, wallet: str):
     if row:
         return row[0], row[1]
     else:
-        return None, None  # Safe when no row
+        return None, None
 
 def db_set_wallet_first_ts(conn, wallet: str, first_ts, updated_ts: int):
     conn.execute(
@@ -161,15 +152,9 @@ def get_recent_trades():
         print(f"Error fetching trades: {e}")
         return []
 
-def is_low_interest_market(title):
-    if not title:
-        return False
-    title_lower = title.lower()
-    return any(keyword in title_lower for keyword in EXCLUDED_KEYWORDS)
-
 print(f"Starting Polymarket monitor... [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}]")
 
-# DB setup - moved before any use
+# DB setup
 conn = db_connect()
 db_init(conn)
 
@@ -197,7 +182,6 @@ for trade in trades:
     value = usdc
 
     market_title = trade.get("title", "")
-    is_sports = is_low_interest_market(market_title)
 
     first_ts = get_first_trade_timestamp(proxy_wallet)
     age_days = 0 if first_ts is None else (current_time - first_ts) / 86400
@@ -206,6 +190,7 @@ for trade in trades:
 
     tx_line = f"  Tx: https://polygonscan.com/tx/{tx_hash}\n" if tx_hash else ""
 
+    # Unified alert building (no keyword filtering - all big trades treated equally)
     if value > NEW_ACCOUNT_VALUE_THRESHOLD and is_new:
         alert_text = (
             f"ALERT: Large new-account trade detected! [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}]\n\n"
@@ -226,25 +211,18 @@ for trade in trades:
             f"  Side: {trade.get('side')} {trade.get('size')} shares @ ${trade.get('price')}\n"
             f"{tx_line}"
         )
-        priority = "LOW" if is_sports else "HIGH"
-        alerts.append((priority, big_text))
+        alerts.append(("HIGH", big_text))  # All big trades now high-signal
 
     trade_ts = int(trade.get("timestamp", current_time))
     db_mark_trade(conn, trade_key, trade_ts)
 
-# Build email body
+# Build email body (simplified - no low-priority section)
 high_alerts = [text for prio, text in alerts if prio == "HIGH"]
-low_alerts = [text for prio, text in alerts if prio == "LOW"]
 
 email_parts = []
 if high_alerts:
-    email_parts.append(f"THINGS TO CHECK - {len(high_alerts)} High-Signal Activity\n")
+    email_parts.append(f"THINGS TO CHECK - {len(high_alerts)} Large / New-Account Trades\n")
     email_parts.extend(high_alerts)
-
-if low_alerts:
-    limited = low_alerts[:MAX_OTHER_TRADES]
-    note = f"\n(Showing {len(limited)} of {len(low_alerts)} sports/low-interest trades)" if len(low_alerts) > MAX_OTHER_TRADES else ""
-    email_parts.append(f"\nOTHER BIG TRADES > $20K (Sports / Low-Interest Markets){note}\n\n" + "\n".join(limited))
 
 # Output
 if email_parts:
@@ -265,5 +243,5 @@ conn.close()
 
 print(f"\n=== RUN SUMMARY [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}] ===")
 print(f"Trades analyzed: {len(trades)}")
-print(f"New alerts: {len(alerts)} (High: {len(high_alerts)}, Low: {len(low_alerts)})")
+print(f"New alerts: {len(alerts)}")
 print("Run complete.")
