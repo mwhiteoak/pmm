@@ -2,9 +2,9 @@ import requests
 import os
 from datetime import datetime, timezone
 
-# Test thresholds (revert to original after confirming emails)
-TRADE_VALUE_THRESHOLD = 100  # Change to 10000 for production
-ACCOUNT_AGE_THRESHOLD_DAYS = 90  # Change to 7 for production
+# PRODUCTION THRESHOLDS (revert from test)
+TRADE_VALUE_THRESHOLD = 100  # $10K+
+ACCOUNT_AGE_THRESHOLD_DAYS = 90
 
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY")
 
@@ -23,12 +23,11 @@ def get_first_tx_timestamp(wallet):
         print("Missing Moralis API key")
         return None
     headers = {"X-API-Key": MORALIS_API_KEY}
-
-    # Primary: Active chains endpoint (efficient for first tx)
-    url_active = f"https://deep-index.moralis.io/api/v2.2/wallets/{wallet}/chains"
-    params_active = {"chains": "0x89"}  # Polygon hex
+    # Best endpoint for first tx
+    url = f"https://deep-index.moralis.io/api/v2.2/wallets/{wallet}/chains"
+    params = {"chains": "0x89"}  # Polygon
     try:
-        response = requests.get(url_active, headers=headers, params=params_active)
+        response = requests.get(url, headers=headers, params=params)
         if response.status_code == 200:
             data = response.json()
             for chain in data.get("active_chains", []):
@@ -39,42 +38,7 @@ def get_first_tx_timestamp(wallet):
                         return int(datetime.fromisoformat(ts_str).timestamp())
     except Exception as e:
         print(f"Active chains error for {wallet}: {e}")
-
-    # Fallback: Transactions endpoint (oldest first)
-    url_tx = f"https://deep-index.moralis.io/api/v2/{wallet}/transactions"
-    params_tx = {"chain": "polygon", "order": "ASC", "limit": 1}
-    try:
-        response = requests.get(url_tx, headers=headers, params=params_tx)
-        response.raise_for_status()
-        data = response.json()
-        if data.get("result"):
-            ts_str = data["result"][0]["block_timestamp"].replace("Z", "+00:00")
-            return int(datetime.fromisoformat(ts_str).timestamp())
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
-            print(f"Wallet {wallet} no tx history (404) - treating as very new?")
-            # Optional: return current_time to flag as new (uncomment if desired)
-            # return int(datetime.now(timezone.utc).timestamp())
-        else:
-            print(f"Tx endpoint error {e.response.status_code} for {wallet}")
-    except Exception as e:
-        print(f"Unexpected error for {wallet}: {e}")
     return None
-
-def format_alert(trade, value, age_days):
-    return f"""
-ALERT: New/Low-Activity Account Large Trade!
-
-Proxy Wallet: {trade.get('proxyWallet')}
-Trade Value: ${value:.2f} USDC
-Side: {trade.get('side')} {trade.get('size')} shares @ ${trade.get('price')}
-Market: {trade.get('title')}
-Account Age: {age_days:.2f} days (or no history - very new!)
-Trade Time: {datetime.fromtimestamp(trade.get('timestamp', 0), tz=timezone.utc)}
-Tx Hash: {trade.get('transactionHash')}
-
----
-"""
 
 print("Starting Polymarket monitor...")
 trades = get_recent_trades()
@@ -91,22 +55,24 @@ for trade in trades:
     if value > TRADE_VALUE_THRESHOLD:
         print(f"Large trade ${value:.2f} by {proxy_wallet} - checking age...")
         first_ts = get_first_tx_timestamp(proxy_wallet)
+        age_note = ""
         if first_ts is None:
-            # No history = very new account (proxy just deployed)
+            age_note = " (no history detected - very new/low-activity proxy)"
             age_days = 0
-            alerts.append(format_alert(trade, value, age_days))
-            print("Match! No tx history - likely brand new account")
-        elif (current_time - first_ts) < ACCOUNT_AGE_THRESHOLD_DAYS * 86400:
-            age_days = (current_time - first_ts) / 86400
-            alerts.append(format_alert(trade, value, age_days))
-            print(f"Match! Age {age_days:.2f} days")
         else:
             age_days = (current_time - first_ts) / 86400
-            print(f"Too old ({age_days:.2f} days)")
+            if age_days >= ACCOUNT_AGE_THRESHOLD_DAYS:
+                print(f"Too old ({age_days:.2f} days)")
+                continue
+
+        if age_days < ACCOUNT_AGE_THRESHOLD_DAYS or first_ts is None:
+            alert_line = f"ALERT: ${value:.2f} trade by {proxy_wallet}{age_note} | Market: {trade.get('title')} | Tx: {trade.get('transactionHash')}"
+            alerts.append(alert_line)
+            print(f"MATCH: {alert_line}")
 
 if alerts:
-    full_alert = "".join(alerts)
-    print(f"{len(alerts)} alert(s) found!\n{full_alert}")
+    full_alert = "\n".join(alerts)  # Single lines, safe for env/email
+    print(f"{len(alerts)} alert(s):\n{full_alert}")
     with open(os.environ["GITHUB_ENV"], "a") as f:
         f.write(f"ALERTS={full_alert}")
 else:
