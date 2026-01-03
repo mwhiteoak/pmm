@@ -1,4 +1,4 @@
-# monitor.py (full updated - with caching, deduplication, rate limiting, and summary)
+# monitor.py (minimal impactful updates applied)
 
 import requests
 import os
@@ -6,9 +6,9 @@ import time
 from datetime import datetime, timezone
 from functools import wraps
 
-# Flexible configuration via environment variables (defaults provided)
+# Flexible configuration
 NEW_ACCOUNT_VALUE_THRESHOLD = int(os.getenv("NEW_ACCOUNT_THRESHOLD", "10000"))
-ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "90"))
+ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))  # Fixed: default 7 days
 BIG_TRADE_THRESHOLD = int(os.getenv("BIG_TRADE_THRESHOLD", "20000"))
 MAX_OTHER_TRADES = 15
 
@@ -21,11 +21,12 @@ EXCLUDED_KEYWORDS = [
     "boxing", "wwe", "esports", "darts", "snooker", "cycling", "olympics"
 ]
 
-# Caching and deduplication
+# Caches and tracking
 wallet_age_cache = {}
-seen_wallets = set()
+seen_trade_keys = set()        # Dedupe by transaction (or fallback key)
+wallet_looked_up = set()       # Ensure age lookup only once per wallet
 
-# Rate limiting for Polymarket activity API (10 calls/sec max recommended)
+# Rate limiting (safe for Polymarket API)
 def rate_limited(max_calls=10, period=1):
     calls = []
     def decorator(func):
@@ -64,7 +65,6 @@ def get_first_trade_timestamp(wallet):
             wallet_age_cache[wallet] = first_ts
             return first_ts
         else:
-            print(f"No Polymarket trade activity found for {wallet}")
             wallet_age_cache[wallet] = None
             return None
     except Exception as e:
@@ -97,19 +97,29 @@ big_trades_high_value = []
 big_trades_other = []
 
 for trade in trades:
-    proxy_wallet = trade.get("proxyWallet")
-    if not proxy_wallet or proxy_wallet in seen_wallets:
+    tx_hash = trade.get("transactionHash")
+    # Dedupe by transaction hash (fallback if missing)
+    trade_key = tx_hash or f'{trade.get("timestamp")}:{trade.get("proxyWallet")}:{trade.get("size")}:{trade.get("price")}'
+    if trade_key in seen_trade_keys:
         continue
-    seen_wallets.add(proxy_wallet)
+    seen_trade_keys.add(trade_key)
+
+    proxy_wallet = trade.get("proxyWallet")
+    if not proxy_wallet:
+        continue
 
     value = float(trade.get("usdcSize") or (float(trade.get("size", 0)) * float(trade.get("price", 0))))
     market_title = trade.get("title", "")
-
     is_sports = is_low_interest_market(market_title)
 
     # --- Big trades >$20K ---
     if value > BIG_TRADE_THRESHOLD:
-        first_ts = get_first_trade_timestamp(proxy_wallet)
+        # Lookup age only once per wallet
+        if proxy_wallet not in wallet_looked_up:
+            get_first_trade_timestamp(proxy_wallet)
+            wallet_looked_up.add(proxy_wallet)
+        first_ts = wallet_age_cache.get(proxy_wallet)
+
         age_note = ""
         if first_ts is None:
             age_note = " (no Polymarket history - brand new user)"
@@ -121,7 +131,7 @@ for trade in trades:
             f"• ${value:.2f} | Wallet: {proxy_wallet}{age_note}\n"
             f"  Market: {market_title}\n"
             f"  Side: {trade.get('side')} {trade.get('size')} shares @ ${trade.get('price')}\n"
-            f"  Tx: https://polygonscan.com/tx/{trade.get('transactionHash')}\n"
+            f"  Tx: https://polygonscan.com/tx/{tx_hash}\n"
         )
         if not is_sports:
             big_trades_high_value.append(big_trade_text)
@@ -131,10 +141,14 @@ for trade in trades:
     # --- New-account large trades >$10K ---
     if value > NEW_ACCOUNT_VALUE_THRESHOLD:
         print(f"Large trade detected: ${value:.2f} by {proxy_wallet} - checking Polymarket age...")
-        first_ts = get_first_trade_timestamp(proxy_wallet)
+        # Ensure age is looked up
+        if proxy_wallet not in wallet_looked_up:
+            get_first_trade_timestamp(proxy_wallet)
+            wallet_looked_up.add(proxy_wallet)
+        first_ts = wallet_age_cache.get(proxy_wallet)
+
         age_note = ""
         age_days = None
-
         if first_ts is None:
             age_note = " (no Polymarket trade history - brand new user)"
             age_days = 0
@@ -149,7 +163,7 @@ for trade in trades:
                 f"Side: {trade.get('side')} {trade.get('size')} shares @ ${trade.get('price')}\n"
                 f"Market: {market_title}\n"
                 f"Trade Time: {datetime.fromtimestamp(trade.get('timestamp', 0), tz=timezone.utc)}\n"
-                f"Transaction: https://polygonscan.com/tx/{trade.get('transactionHash')}\n"
+                f"Transaction: https://polygonscan.com/tx/{tx_hash}\n"
                 f"Proxy Wallet Explorer: https://polygonscan.com/address/{proxy_wallet}\n"
             )
             new_account_alerts.append(alert_text)
@@ -166,7 +180,7 @@ if high_signal_count > 0:
     )
 
 if new_account_alerts:
-    email_parts.append("NEW ACCOUNT LARGE TRADES (> $10K from accounts <7 days old or no Polymarket history)\n")
+    email_parts.append(f"NEW ACCOUNT LARGE TRADES (> ${NEW_ACCOUNT_VALUE_THRESHOLD} from accounts <{ACCOUNT_AGE_THRESHOLD_DAYS} days old or no Polymarket history)\n")
     email_parts.extend(new_account_alerts)
 
 if big_trades_high_value:
@@ -194,8 +208,8 @@ else:
 # Run summary
 print(f"\n=== RUN SUMMARY [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}] ===")
 print(f"Trades analyzed: {len(trades)}")
-print(f"Unique wallets processed: {len(seen_wallets)}")
-print(f"Wallet age API calls: {len(wallet_age_cache)}")
+print(f"Unique trades processed: {len(seen_trade_keys)}")
+print(f"Unique wallets looked up: {len(wallet_looked_up)}")
 print(f"New account alerts: {len(new_account_alerts)}")
 print(f"High-signal big trades: {len(big_trades_high_value)}")
 print(f"Other big trades: {len(big_trades_other)}")
