@@ -5,8 +5,8 @@ import os
 from datetime import datetime, timezone
 
 # THRESHOLDS
-NEW_ACCOUNT_VALUE_THRESHOLD = 100      # $10K+ for new-account alerts
-ACCOUNT_AGE_THRESHOLD_DAYS = 90           # <7 days old
+NEW_ACCOUNT_VALUE_THRESHOLD = 5000      # $10K+ for new-account alerts
+ACCOUNT_AGE_THRESHOLD_DAYS = 21           # <7 days old
 BIG_TRADE_THRESHOLD = 20000              # $20K+ to list regardless of age
 
 # Sports/low-interest markets to de-prioritize (still shown, but not flagged as high-value)
