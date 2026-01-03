@@ -1,16 +1,26 @@
-# monitor.py (minimal impactful updates applied)
+# monitor.py (full - with persistent SQLite DB, caching, pruning, and Actions cache compatibility)
 
 import requests
 import os
 import time
+import sqlite3
+from pathlib import Path
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 
-# Flexible configuration
-NEW_ACCOUNT_VALUE_THRESHOLD = int(os.getenv("NEW_ACCOUNT_THRESHOLD", "10000"))
-ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))  # Fixed: default 7 days
-BIG_TRADE_THRESHOLD = int(os.getenv("BIG_TRADE_THRESHOLD", "20000"))
+# Config
+NEW_ACCOUNT_VALUE_THRESHOLD = Decimal(os.getenv("NEW_ACCOUNT_THRESHOLD", "10000"))
+ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))
+BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "20000"))
 MAX_OTHER_TRADES = 15
+SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "21"))
+WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "14"))
+
+# State directory (will be cached by GitHub Actions)
+STATE_DIR = Path(os.getenv("STATE_DIR", ".state"))
+STATE_DIR.mkdir(exist_ok=True)
+DB_PATH = STATE_DIR / "polymarket_state.sqlite"
 
 # Sports/low-interest keywords
 EXCLUDED_KEYWORDS = [
@@ -21,12 +31,67 @@ EXCLUDED_KEYWORDS = [
     "boxing", "wwe", "esports", "darts", "snooker", "cycling", "olympics"
 ]
 
-# Caches and tracking
+# In-memory cache for current run
 wallet_age_cache = {}
-seen_trade_keys = set()        # Dedupe by transaction (or fallback key)
-wallet_looked_up = set()       # Ensure age lookup only once per wallet
 
-# Rate limiting (safe for Polymarket API)
+# Session for connection pooling
+session = requests.Session()
+session.headers.update({"User-Agent": "PolymarketMonitor/1.0 (+github.com/yourrepo)"})
+
+# DB helpers
+def db_connect():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
+def db_init(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS seen_trades (
+            trade_key TEXT PRIMARY KEY,
+            seen_ts   INTEGER NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS wallet_first_trade (
+            wallet         TEXT PRIMARY KEY,
+            first_trade_ts INTEGER,
+            updated_ts     INTEGER NOT NULL
+        )
+    """)
+    conn.commit()
+
+def db_seen_trade(conn, trade_key: str) -> bool:
+    row = conn.execute("SELECT 1 FROM seen_trades WHERE trade_key = ?", (trade_key,)).fetchone()
+    return row is not None
+
+def db_mark_trade(conn, trade_key: str, seen_ts: int):
+    conn.execute(
+        "INSERT OR REPLACE INTO seen_trades(trade_key, seen_ts) VALUES(?, ?)",
+        (trade_key, seen_ts)
+    )
+
+def db_get_wallet_first_ts(conn, wallet: str):
+    row = conn.execute(
+        "SELECT first_trade_ts, updated_ts FROM wallet_first_trade WHERE wallet = ?",
+        (wallet,)
+    ).fetchone()
+    return row  # (first_trade_ts, updated_ts) or None
+
+def db_set_wallet_first_ts(conn, wallet: str, first_ts, updated_ts: int):
+    conn.execute(
+        "INSERT OR REPLACE INTO wallet_first_trade(wallet, first_trade_ts, updated_ts) VALUES(?, ?, ?)",
+        (wallet, first_ts, updated_ts)
+    )
+
+def db_prune(conn, now_ts: int):
+    cutoff_seen = now_ts - SEEN_TRADE_RETENTION_DAYS * 86400
+    cutoff_wallet = now_ts - WALLET_TS_TTL_DAYS * 86400
+    conn.execute("DELETE FROM seen_trades WHERE seen_ts < ?", (cutoff_seen,))
+    conn.execute("DELETE FROM wallet_first_trade WHERE updated_ts < ?", (cutoff_wallet,))
+    conn.commit()
+
+# Rate limiting
 def rate_limited(max_calls=10, period=1):
     calls = []
     def decorator(func):
@@ -45,9 +110,17 @@ def rate_limited(max_calls=10, period=1):
 
 @rate_limited(max_calls=10, period=1)
 def get_first_trade_timestamp(wallet):
+    # 1. In-memory cache
     if wallet in wallet_age_cache:
         return wallet_age_cache[wallet]
-    
+
+    # 2. Persistent cache (with TTL)
+    first_ts, updated_ts = db_get_wallet_first_ts(conn, wallet)
+    if updated_ts is not None and (current_time - updated_ts) < WALLET_TS_TTL_DAYS * 86400:
+        wallet_age_cache[wallet] = first_ts
+        return first_ts
+
+    # 3. API call
     url = "https://data-api.polymarket.com/activity"
     params = {
         "user": wallet,
@@ -57,25 +130,32 @@ def get_first_trade_timestamp(wallet):
         "sortDirection": "ASC"
     }
     try:
-        response = requests.get(url, params=params, timeout=10)
+        response = session.get(url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         if data and len(data) > 0:
             first_ts = int(data[0]["timestamp"])
-            wallet_age_cache[wallet] = first_ts
-            return first_ts
         else:
-            wallet_age_cache[wallet] = None
-            return None
+            first_ts = None
     except Exception as e:
         print(f"Polymarket activity API error for {wallet}: {e}")
-        wallet_age_cache[wallet] = None
-        return None
+        first_ts = None
+
+    # Persist
+    db_set_wallet_first_ts(conn, wallet, first_ts, current_time)
+    wallet_age_cache[wallet] = first_ts
+    return first_ts
+
+def safe_decimal(val):
+    try:
+        return Decimal(str(val)) if val not in (None, "", "None") else Decimal("0")
+    except (InvalidOperation, TypeError):
+        return Decimal("0")
 
 def get_recent_trades():
     params = {"limit": 500}
     try:
-        response = requests.get("https://data-api.polymarket.com/trades", params=params, timeout=10)
+        response = session.get("https://data-api.polymarket.com/trades", params=params, timeout=10)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -89,114 +169,91 @@ def is_low_interest_market(title):
     return any(keyword in title_lower for keyword in EXCLUDED_KEYWORDS)
 
 print(f"Starting Polymarket monitor... [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}]")
+
+# DB setup
+conn = db_connect()
+db_init(conn)
+
 trades = get_recent_trades()
 current_time = int(datetime.now(timezone.utc).timestamp())
 
-new_account_alerts = []
-big_trades_high_value = []
-big_trades_other = []
+alerts = []
 
 for trade in trades:
     tx_hash = trade.get("transactionHash")
-    # Dedupe by transaction hash (fallback if missing)
     trade_key = tx_hash or f'{trade.get("timestamp")}:{trade.get("proxyWallet")}:{trade.get("size")}:{trade.get("price")}'
-    if trade_key in seen_trade_keys:
+
+    # Persistent dedupe
+    if db_seen_trade(conn, trade_key):
         continue
-    seen_trade_keys.add(trade_key)
 
     proxy_wallet = trade.get("proxyWallet")
     if not proxy_wallet:
         continue
 
-    value = float(trade.get("usdcSize") or (float(trade.get("size", 0)) * float(trade.get("price", 0))))
+    usdc = safe_decimal(trade.get("usdcSize"))
+    if usdc == 0:
+        size = safe_decimal(trade.get("size", 0))
+        price = safe_decimal(trade.get("price", 0))
+        usdc = size * price
+    value = usdc
+
     market_title = trade.get("title", "")
     is_sports = is_low_interest_market(market_title)
 
-    # --- Big trades >$20K ---
-    if value > BIG_TRADE_THRESHOLD:
-        # Lookup age only once per wallet
-        if proxy_wallet not in wallet_looked_up:
-            get_first_trade_timestamp(proxy_wallet)
-            wallet_looked_up.add(proxy_wallet)
-        first_ts = wallet_age_cache.get(proxy_wallet)
+    first_ts = get_first_trade_timestamp(proxy_wallet)
+    age_days = 0 if first_ts is None else (current_time - first_ts) / 86400
+    age_note = " (no Polymarket history - brand new)" if first_ts is None else f" (Polymarket age: {age_days:.1f} days)"
+    is_new = (first_ts is None) or (age_days < ACCOUNT_AGE_THRESHOLD_DAYS)
 
-        age_note = ""
-        if first_ts is None:
-            age_note = " (no Polymarket history - brand new user)"
-        else:
-            age_days = (current_time - first_ts) / 86400
-            age_note = f" (Polymarket age: {age_days:.1f} days)"
+    tx_line = f"  Tx: https://polygonscan.com/tx/{tx_hash}\n" if tx_hash else ""
 
-        big_trade_text = (
-            f"• ${value:.2f} | Wallet: {proxy_wallet}{age_note}\n"
+    # Unified alert building
+    if value > NEW_ACCOUNT_VALUE_THRESHOLD and is_new:
+        alert_text = (
+            f"ALERT: Large new-account trade detected! [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}]\n\n"
+            f"Proxy Wallet: {proxy_wallet}{age_note}\n"
+            f"Trade Value: ${value:,.2f} USDC\n"
+            f"Side: {trade.get('side')} {trade.get('size')} shares @ ${trade.get('price')}\n"
+            f"Market: {market_title}\n"
+            f"Trade Time: {datetime.fromtimestamp(trade.get('timestamp', 0), tz=timezone.utc)}\n"
+            f"{tx_line}"
+            f"  Proxy Wallet Explorer: https://polygonscan.com/address/{proxy_wallet}\n"
+        )
+        alerts.append(("HIGH", alert_text))
+
+    elif value > BIG_TRADE_THRESHOLD:
+        big_text = (
+            f"• ${value:,.2f} | Wallet: {proxy_wallet}{age_note}\n"
             f"  Market: {market_title}\n"
             f"  Side: {trade.get('side')} {trade.get('size')} shares @ ${trade.get('price')}\n"
-            f"  Tx: https://polygonscan.com/tx/{tx_hash}\n"
+            f"{tx_line}"
         )
-        if not is_sports:
-            big_trades_high_value.append(big_trade_text)
-        else:
-            big_trades_other.append(big_trade_text)
+        priority = "LOW" if is_sports else "HIGH"
+        alerts.append((priority, big_text))
 
-    # --- New-account large trades >$10K ---
-    if value > NEW_ACCOUNT_VALUE_THRESHOLD:
-        print(f"Large trade detected: ${value:.2f} by {proxy_wallet} - checking Polymarket age...")
-        # Ensure age is looked up
-        if proxy_wallet not in wallet_looked_up:
-            get_first_trade_timestamp(proxy_wallet)
-            wallet_looked_up.add(proxy_wallet)
-        first_ts = wallet_age_cache.get(proxy_wallet)
-
-        age_note = ""
-        age_days = None
-        if first_ts is None:
-            age_note = " (no Polymarket trade history - brand new user)"
-            age_days = 0
-        else:
-            age_days = (current_time - first_ts) / 86400
-
-        if age_days < ACCOUNT_AGE_THRESHOLD_DAYS:
-            alert_text = (
-                f"ALERT: Large new-account trade detected! [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}]\n\n"
-                f"Proxy Wallet: {proxy_wallet}{age_note}\n"
-                f"Trade Value: ${value:.2f} USDC\n"
-                f"Side: {trade.get('side')} {trade.get('size')} shares @ ${trade.get('price')}\n"
-                f"Market: {market_title}\n"
-                f"Trade Time: {datetime.fromtimestamp(trade.get('timestamp', 0), tz=timezone.utc)}\n"
-                f"Transaction: https://polygonscan.com/tx/{tx_hash}\n"
-                f"Proxy Wallet Explorer: https://polygonscan.com/address/{proxy_wallet}\n"
-            )
-            new_account_alerts.append(alert_text)
-            print(f"MATCH FOUND: New-account large trade ${value:.2f} (Polymarket age: {age_days:.1f} days)")
+    # Mark as seen
+    trade_ts = int(trade.get("timestamp", current_time))
+    db_mark_trade(conn, trade_key, trade_ts)
 
 # Build email body
+high_alerts = [text for prio, text in alerts if prio == "HIGH"]
+low_alerts = [text for prio, text in alerts if prio == "LOW"]
+
 email_parts = []
+if high_alerts:
+    email_parts.append(f"THINGS TO CHECK - {len(high_alerts)} High-Signal Activity\n")
+    email_parts.extend(high_alerts)
 
-high_signal_count = len(new_account_alerts) + len(big_trades_high_value)
-if high_signal_count > 0:
-    email_parts.append(
-        f"THINGS TO CHECK - {high_signal_count} High-Signal Activity "
-        "(Politics, Crypto, Finance, Elections, News - sports filtered out)\n"
-    )
+if low_alerts:
+    limited = low_alerts[:MAX_OTHER_TRADES]
+    note = f"\n(Showing {len(limited)} of {len(low_alerts)} sports/low-interest trades)" if len(low_alerts) > MAX_OTHER_TRADES else ""
+    email_parts.append(f"\nOTHER BIG TRADES > $20K (Sports / Low-Interest Markets){note}\n\n" + "\n".join(limited))
 
-if new_account_alerts:
-    email_parts.append(f"NEW ACCOUNT LARGE TRADES (> ${NEW_ACCOUNT_VALUE_THRESHOLD} from accounts <{ACCOUNT_AGE_THRESHOLD_DAYS} days old or no Polymarket history)\n")
-    email_parts.extend(new_account_alerts)
-
-if big_trades_high_value:
-    email_parts.append("HIGH-SIGNAL TRADES > $20K\n\n" + "\n".join(big_trades_high_value))
-
-if big_trades_other:
-    limited_other = big_trades_other[:MAX_OTHER_TRADES]
-    note = f"\n(Showing {len(limited_other)} of {len(big_trades_other)} sports/low-interest trades)" if len(big_trades_other) > MAX_OTHER_TRADES else ""
-    email_parts.append("\nOTHER BIG TRADES > $20K (Sports / Low-Interest Markets)" + note + "\n\n" + "\n".join(limited_other))
-
-# Write safely
+# Output
 if email_parts:
     full_alert = "\n\n".join(email_parts)
-    print(f"Alerts generated: {len(new_account_alerts)} new-account + {len(big_trades_high_value)} high-signal big + {len(big_trades_other)} other big")
     print(full_alert)
-
     delimiter = "EOF_POLYMARKET_ALERT"
     with open(os.environ["GITHUB_ENV"], "a") as f:
         f.write(f"ALERTS<<{delimiter}\n")
@@ -205,12 +262,12 @@ if email_parts:
 else:
     print("No qualifying trades this run.")
 
-# Run summary
+# Cleanup
+db_prune(conn, current_time)
+conn.commit()
+conn.close()
+
 print(f"\n=== RUN SUMMARY [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}] ===")
 print(f"Trades analyzed: {len(trades)}")
-print(f"Unique trades processed: {len(seen_trade_keys)}")
-print(f"Unique wallets looked up: {len(wallet_looked_up)}")
-print(f"New account alerts: {len(new_account_alerts)}")
-print(f"High-signal big trades: {len(big_trades_high_value)}")
-print(f"Other big trades: {len(big_trades_other)}")
+print(f"New alerts: {len(alerts)} (High: {len(high_alerts)}, Low: {len(low_alerts)})")
 print("Run complete.")
