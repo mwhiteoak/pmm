@@ -1,0 +1,51 @@
+name: Polymarket Monitor
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Every 5 minutes
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Download seen hashes artifact (if exists)
+        uses: actions/download-artifact@v4
+        with:
+          name: seen-hashes
+          path: .
+
+      - name: Run monitor
+        run: python monitor.py
+        env:
+          MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
+
+      - name: Upload seen hashes artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: seen-hashes
+          path: seen_tx_hashes.json
+
+      - name: Send email if alerts
+        if: env.ALERTS != ''
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.EMAIL_SERVER }}
+          server_port: ${{ secrets.EMAIL_PORT }}
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: Polymarket Large New Account Trade Alert
+          to: ${{ secrets.EMAIL_TO }}
+          from: ${{ secrets.EMAIL_FROM }}
+          body: ${{ env.ALERTS }}
+          convert_markdown: true
