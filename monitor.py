@@ -1,4 +1,4 @@
-# monitor.py (fixed indentation + full real-time WebSocket version)
+# monitor.py (fixed syntax error + full real-time WebSocket version)
 
 import requests
 import os
@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
-import websocket  # pip install websocket-client (add to workflow if needed)
+import websocket  # pip install websocket-client
 
 # Config
 NEW_ACCOUNT_VALUE_THRESHOLD = Decimal("10000")
@@ -30,7 +30,7 @@ wallet_age_cache = {}
 session = requests.Session()
 session.headers.update({"User-Agent": "PolymarketMonitor/1.0"})
 
-# DB helpers (same as before)
+# DB helpers
 def db_connect():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -170,7 +170,7 @@ def on_message(ws, message):
             market_title = trade.get("title", "Unknown")
 
             first_ts = get_first_trade_timestamp(proxy_wallet)
-            age_days = 0 if first_ts is None else (current_time - first_ts#endif) / 86400
+            age_days = 0 if first_ts is None else (current_time - first_ts) / 86400
             age_note = " (brand new)" if first_ts is None else f" (age: {age_days:.1f}d)"
             is_new = (first_ts is None) or (age_days < ACCOUNT_AGE_THRESHOLD_DAYS)
 
@@ -231,7 +231,7 @@ def on_open(ws):
     ws.send(subscribe_msg)
 
 def start_websocket():
-    ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws"  # Official CLOB WebSocket
+    ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws"
     ws = websocket.WebSocketApp(
         ws_url,
         on_open=on_open,
