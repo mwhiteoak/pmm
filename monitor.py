@@ -1,4 +1,4 @@
-# monitor.py (fixed syntax error + full real-time WebSocket version)
+# monitor.py (full stable polling version with $10K big trade threshold)
 
 import requests
 import os
@@ -7,24 +7,19 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from functools import wraps
-import websocket  # pip install websocket-client
 
-# Config
-NEW_ACCOUNT_VALUE_THRESHOLD = Decimal("10000")
-ACCOUNT_AGE_THRESHOLD_DAYS = 7
-BIG_TRADE_THRESHOLD = Decimal("10000")
+# Config - $10K threshold for more whale/copy-trade alerts
+NEW_ACCOUNT_VALUE_THRESHOLD = Decimal(os.getenv("NEW_ACCOUNT_THRESHOLD", "10000"))
+ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))
+BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "10000"))  # $10K+ for big bets
 MAX_OTHER_TRADES = 15
-SEEN_TRADE_RETENTION_DAYS = 21
-WALLET_TS_TTL_DAYS = 14
+SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "21"))
+WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "14"))
 
 # State
 STATE_DIR = Path(".state")
 STATE_DIR.mkdir(exist_ok=True)
 DB_PATH = STATE_DIR / "polymarket_state.sqlite"
-
-# In-memory cache
-wallet_age_cache = {}
 
 # Session
 session = requests.Session()
@@ -86,31 +81,9 @@ def db_prune(conn, now_ts: int):
     conn.execute("DELETE FROM wallet_first_trade WHERE updated_ts < ?", (cutoff_wallet,))
     conn.commit()
 
-# Rate limiting
-def rate_limited(max_calls=10, period=1):
-    calls = []
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            now = time.time()
-            calls[:] = [c for c in calls if c > now - period]
-            if len(calls) >= max_calls:
-                sleep_time = period - (now - calls[0])
-                print(f"Rate limit hit - sleeping {sleep_time:.2f}s")
-                time.sleep(sleep_time)
-            calls.append(time.time())
-            return func(*args, **kwargs)
-        return wrapper
-    return decorator
-
-@rate_limited(max_calls=10, period=1)
 def get_first_trade_timestamp(wallet):
-    if wallet in wallet_age_cache:
-        return wallet_age_cache[wallet]
-
     first_ts, updated_ts = db_get_wallet_first_ts(conn, wallet)
     if updated_ts is not None and (time.time() - updated_ts) < WALLET_TS_TTL_DAYS * 86400:
-        wallet_age_cache[wallet] = first_ts
         return first_ts
 
     url = "https://data-api.polymarket.com/activity"
@@ -134,7 +107,6 @@ def get_first_trade_timestamp(wallet):
         first_ts = None
 
     db_set_wallet_first_ts(conn, wallet, first_ts, int(time.time()))
-    wallet_age_cache[wallet] = first_ts
     return first_ts
 
 def safe_decimal(val):
@@ -143,108 +115,91 @@ def safe_decimal(val):
     except (InvalidOperation, TypeError):
         return Decimal("0")
 
-# WebSocket handlers
-def on_message(ws, message):
+def get_recent_trades():
+    params = {"limit": 500}
     try:
-        data = json.loads(message)
-        if data.get("topic") != "activity" or data.get("type") != "trades":
-            return
-
-        current_time = int(time.time())
-        alerts = []
-
-        for payload in data.get("payload", []):
-            trade = payload.get("trade", {})
-            tx_hash = trade.get("transactionHash")
-            trade_key = tx_hash or f'{trade.get("timestamp")}:{trade.get("proxyWallet")}'
-
-            if db_seen_trade(conn, trade_key):
-                continue
-
-            proxy_wallet = trade.get("proxyWallet")
-            if not proxy_wallet:
-                continue
-
-            value = safe_decimal(trade.get("usdcSize")) or (safe_decimal(trade.get("size")) * safe_decimal(trade.get("price")))
-
-            market_title = trade.get("title", "Unknown")
-
-            first_ts = get_first_trade_timestamp(proxy_wallet)
-            age_days = 0 if first_ts is None else (current_time - first_ts) / 86400
-            age_note = " (brand new)" if first_ts is None else f" (age: {age_days:.1f}d)"
-            is_new = (first_ts is None) or (age_days < ACCOUNT_AGE_THRESHOLD_DAYS)
-
-            tx_line = f"  Tx: https://polygonscan.com/tx/{tx_hash}\n" if tx_hash else ""
-
-            alert_text = None
-            if value > NEW_ACCOUNT_VALUE_THRESHOLD and is_new:
-                alert_text = (
-                    f"ALERT: New user ${value:,.0f} bet!\n"
-                    f"Wallet: {proxy_wallet}{age_note}\n"
-                    f"Market: {market_title}\n"
-                    f"Side: {trade.get('side')} {trade.get('size')} @ ${trade.get('price')}\n"
-                    f"{tx_line}"
-                    f"Explorer: https://polygonscan.com/address/{proxy_wallet}\n"
-                )
-            elif value > BIG_TRADE_THRESHOLD:
-                alert_text = (
-                    f"WHALE: ${value:,.0f} bet\n"
-                    f"Wallet: {proxy_wallet}{age_note}\n"
-                    f"Market: {market_title}\n"
-                    f"Side: {trade.get('side')} {trade.get('size')} @ ${trade.get('price')}\n"
-                    f"{tx_line}"
-                )
-
-            if alert_text:
-                alerts.append(alert_text)
-                print(f"\n{alert_text}")
-
-            trade_ts = int(trade.get("timestamp", current_time))
-            db_mark_trade(conn, trade_key, trade_ts)
-
-        if alerts:
-            full_alert = "REAL-TIME WHALE ALERTS\n\n" + "\n".join(alerts)
-            delimiter = "EOF_POLYMARKET_ALERT"
-            with open(os.environ["GITHUB_ENV"], "a") as f:
-                f.write(f"ALERTS<<{delimiter}\n")
-                f.write(full_alert + "\n")
-                f.write(f"{delimiter}\n")
-
+        response = session.get("https://data-api.polymarket.com/trades", params=params, timeout=10)
+        response.raise_for_status()
+        return response.json()
     except Exception as e:
-        print(f"Error processing message: {e}")
+        print(f"Error fetching trades: {e}")
+        return []
 
-def on_error(ws, error):
-    print(f"WebSocket error: {error}")
+print(f"Starting Polymarket monitor... [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}]")
 
-def on_close(ws, close_status_code, close_msg):
-    print("WebSocket closed - reconnecting in 5s...")
-    time.sleep(5)
-    start_websocket()
-
-def on_open(ws):
-    print("WebSocket connected - subscribing to trades...")
-    subscribe_msg = json.dumps({
-        "subscriptions": [
-            {"topic": "activity", "type": "trades"}
-        ]
-    })
-    ws.send(subscribe_msg)
-
-def start_websocket():
-    ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws"
-    ws = websocket.WebSocketApp(
-        ws_url,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
-    )
-    ws.run_forever()
-
-print(f"Starting real-time Polymarket whale monitor... [{datetime.now(timezone.utc)}]")
-
-# DB setup
 conn = db_connect()
 db_init(conn)
 
-start_websocket()
+trades = get_recent_trades()
+current_time = int(datetime.now(timezone.utc).timestamp())
+
+alerts = []
+
+for trade in trades:
+    tx_hash = trade.get("transactionHash")
+    trade_key = tx_hash or f'{trade.get("timestamp")}:{trade.get("proxyWallet")}:{trade.get("size")}:{trade.get("price")}'
+
+    if db_seen_trade(conn, trade_key):
+        continue
+
+    proxy_wallet = trade.get("proxyWallet")
+    if not proxy_wallet:
+        continue
+
+    value = safe_decimal(trade.get("usdcSize")) or (safe_decimal(trade.get("size")) * safe_decimal(trade.get("price")))
+
+    market_title = trade.get("title", "Unknown Market")
+
+    first_ts = get_first_trade_timestamp(proxy_wallet)
+    age_days = 0 if first_ts is None else (current_time - first_ts) / 86400
+    age_note = " (brand new)" if first_ts is None else f" (age: {age_days:.1f}d)"
+    is_new = (first_ts is None) or (age_days < ACCOUNT_AGE_THRESHOLD_DAYS)
+
+    tx_line = f"  Tx: https://polygonscan.com/tx/{tx_hash}\n" if tx_hash else ""
+
+    alert_text = None
+    if value > NEW_ACCOUNT_VALUE_THRESHOLD and is_new:
+        alert_text = (
+            f"ALERT: New user ${value:,.0f} bet!\n"
+            f"Wallet: {proxy_wallet}{age_note}\n"
+            f"Market: {market_title}\n"
+            f"Side: {trade.get('side')} {trade.get('size')} @ ${trade.get('price')}\n"
+            f"{tx_line}"
+            f"Explorer: https://polygonscan.com/address/{proxy_wallet}\n"
+        )
+    elif value > BIG_TRADE_THRESHOLD:
+        alert_text = (
+            f"WHALE: ${value:,.0f} bet\n"
+            f"Wallet: {proxy_wallet}{age_note}\n"
+            f"Market: {market_title}\n"
+            f"Side: {trade.get('side')} {trade.get('size')} @ ${trade.get('price')}\n"
+            f"{tx_line}"
+        )
+
+    if alert_text:
+        alerts.append(alert_text)
+        print(f"\n{alert_text}")
+
+    trade_ts = int(trade.get("timestamp", current_time))
+    db_mark_trade(conn, trade_key, trade_ts)
+
+# Build email
+if alerts:
+    full_alert = "LARGE / NEW ACCOUNT TRADES\n\n" + "\n".join(alerts)
+    print(full_alert)
+    delimiter = "EOF_POLYMARKET_ALERT"
+    with open(os.environ["GITHUB_ENV"], "a") as f:
+        f.write(f"ALERTS<<{delimiter}\n")
+        f.write(full_alert + "\n")
+        f.write(f"{delimiter}\n")
+else:
+    print("No qualifying trades this run.")
+
+db_prune(conn, current_time)
+conn.commit()
+conn.close()
+
+print(f"\n=== RUN SUMMARY [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}] ===")
+print(f"Trades analyzed: {len(trades)}")
+print(f"New alerts: {len(alerts)}")
+print("Run complete.")
