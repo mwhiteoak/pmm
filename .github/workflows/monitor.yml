@@ -1,9 +1,11 @@
+# .github/workflows/monitor.yml (full updated - with websocket-client dependency)
+
 name: Polymarket Monitor
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
+    - cron: '*/5 * * * *'  # Every 5 minutes
+  workflow_dispatch:  # Allows manual trigger
 
 jobs:
   monitor:
@@ -15,7 +17,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .state
-          key: polymarket-state-$$ {{ runner.os }}- $${{ github.ref_name }}
+          key: polymarket-state-${{ runner.os }}-${{ github.ref_name }}
           restore-keys: |
             polymarket-state-${{ runner.os }}-
 
@@ -25,7 +27,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests websocket-client
 
       - name: Run monitor
         run: python monitor.py
@@ -38,8 +40,20 @@ jobs:
           server_port: ${{ secrets.EMAIL_PORT }}
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: Polymarket Large New Account Trade Alert
+          subject: Polymarket Whale Alert - Large / New Account Trades
           to: ${{ secrets.EMAIL_TO }}
           from: ${{ secrets.EMAIL_FROM }}
           body: ${{ env.ALERTS }}
           convert_markdown: true
+
+      - name: Debug - View SQLite database (optional - remove when done)
+        if: always()
+        run: |
+          echo "=== seen_trades table (last 20) ==="
+          sqlite3 .state/polymarket_state.sqlite "SELECT trade_key, datetime(seen_ts, 'unixepoch') FROM seen_trades ORDER BY seen_ts DESC LIMIT 20;"
+          echo ""
+          echo "=== wallet_first_trade table (last 20) ==="
+          sqlite3 .state/polymarket_state.sqlite "SELECT wallet, first_trade_ts, datetime(updated_ts, 'unixepoch') FROM wallet_first_trade ORDER BY updated_ts DESC LIMIT 20;"
+          echo ""
+          echo "Total seen trades: $(sqlite3 .state/polymarket_state.sqlite 'SELECT COUNT(*) FROM seen_trades;')"
+          echo "Total wallets cached: $(sqlite3 .state/polymarket_state.sqlite 'SELECT COUNT(*) FROM wallet_first_trade;')"
