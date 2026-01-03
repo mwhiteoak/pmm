@@ -19,23 +19,10 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Download seen hashes artifact (if exists)
-        uses: actions/download-artifact@v4
-        with:
-          name: seen-hashes
-          path: .
-        continue-on-error: true  # <--- This is the key addition
-
       - name: Run monitor
         run: python monitor.py
         env:
           MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
-
-      - name: Upload seen hashes artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: seen-hashes
-          path: seen_tx_hashes.json
 
       - name: Send email if alerts
         if: env.ALERTS != ''
