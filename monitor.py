@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 # Configuration
 POLYMARKET_TRADES_URL = "https://data-api.polymarket.com/trades"
 TRADE_VALUE_THRESHOLD = 100  # $10K in USDC
-ACCOUNT_AGE_THRESHOLD_DAYS = 30
+ACCOUNT_AGE_THRESHOLD_DAYS = 365
 
 # Load Moralis API key
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY")
