@@ -9,12 +9,12 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 # Config - $10K threshold for more whale/copy-trade alerts
-NEW_ACCOUNT_VALUE_THRESHOLD = Decimal(os.getenv("NEW_ACCOUNT_THRESHOLD", "10000"))
-ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))
-BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "10000"))  # $10K+ for big bets
+NEW_ACCOUNT_VALUE_THRESHOLD = Decimal(os.getenv("NEW_ACCOUNT_THRESHOLD", "20000"))
+ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "90"))
+BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "20000"))  # $10K+ for big bets
 MAX_OTHER_TRADES = 15
-SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "21"))
-WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "14"))
+SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "90"))
+WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "30"))
 
 # State
 STATE_DIR = Path(".state")
