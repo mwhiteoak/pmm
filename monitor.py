@@ -1,10 +1,12 @@
+# monitor.py (full updated script - production ready)
+
 import requests
 import os
 from datetime import datetime, timezone
 
-# PRODUCTION THRESHOLDS (revert from test)
-TRADE_VALUE_THRESHOLD = 100  # $10K+
-ACCOUNT_AGE_THRESHOLD_DAYS = 90
+# PRODUCTION THRESHOLDS
+TRADE_VALUE_THRESHOLD = 100      # $10K+ trades
+ACCOUNT_AGE_THRESHOLD_DAYS = 90     # Accounts younger than 7 days
 
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY")
 
@@ -23,7 +25,6 @@ def get_first_tx_timestamp(wallet):
         print("Missing Moralis API key")
         return None
     headers = {"X-API-Key": MORALIS_API_KEY}
-    # Best endpoint for first tx
     url = f"https://deep-index.moralis.io/api/v2.2/wallets/{wallet}/chains"
     params = {"chains": "0x89"}  # Polygon
     try:
@@ -50,31 +51,49 @@ for trade in trades:
     if not proxy_wallet:
         continue
 
+    # Prefer usdcSize if available, otherwise size * price
     value = float(trade.get("usdcSize") or (float(trade.get("size", 0)) * float(trade.get("price", 0))))
 
     if value > TRADE_VALUE_THRESHOLD:
-        print(f"Large trade ${value:.2f} by {proxy_wallet} - checking age...")
+        print(f"Large trade detected: ${value:.2f} by {proxy_wallet} - checking age...")
         first_ts = get_first_tx_timestamp(proxy_wallet)
         age_note = ""
+        age_days = None
+
         if first_ts is None:
-            age_note = " (no history detected - very new/low-activity proxy)"
-            age_days = 0
+            age_note = " (no transaction history detected - likely very new/low-activity proxy wallet)"
+            age_days = 0  # Treat as new
         else:
             age_days = (current_time - first_ts) / 86400
-            if age_days >= ACCOUNT_AGE_THRESHOLD_DAYS:
-                print(f"Too old ({age_days:.2f} days)")
-                continue
 
-        if age_days < ACCOUNT_AGE_THRESHOLD_DAYS or first_ts is None:
-            alert_line = f"ALERT: ${value:.2f} trade by {proxy_wallet}{age_note} | Market: {trade.get('title')} | Tx: {trade.get('transactionHash')}"
-            alerts.append(alert_line)
-            print(f"MATCH: {alert_line}")
+        if age_days < ACCOUNT_AGE_THRESHOLD_DAYS:
+            alert_text = (
+                f"ALERT: Large new-account trade detected!\n\n"
+                f"Proxy Wallet: {proxy_wallet}{age_note}\n"
+                f"Trade Value: ${value:.2f} USDC\n"
+                f"Side: {trade.get('side')} {trade.get('size')} shares @ ${trade.get('price')}\n"
+                f"Market: {trade.get('title')}\n"
+                f"Trade Time: {datetime.fromtimestamp(trade.get('timestamp', 0), tz=timezone.utc)}\n"
+                f"Transaction: https://polygonscan.com/tx/{trade.get('transactionHash')}\n"
+                f"Proxy Wallet Explorer: https://polygonscan.com/address/{proxy_wallet}\n"
+            )
+            alerts.append(alert_text)
+            print(f"MATCH FOUND: ${value:.2f} trade by new/low-activity account")
 
+        else:
+            print(f"Account too old ({age_days:.2f} days) - no alert")
+
+# Safely write multiline ALERTS to GITHUB_ENV using delimiter
 if alerts:
-    full_alert = "\n".join(alerts)  # Single lines, safe for env/email
-    print(f"{len(alerts)} alert(s):\n{full_alert}")
+    full_alert = "\n\n".join(alerts)  # Separate alerts with blank lines
+    print(f"{len(alerts)} alert(s) found!")
+    print(full_alert)
+
+    delimiter = "EOF_POLYMARKET_ALERT"
     with open(os.environ["GITHUB_ENV"], "a") as f:
-        f.write(f"ALERTS={full_alert}")
+        f.write(f"ALERTS<<{delimiter}\n")
+        f.write(full_alert + "\n")
+        f.write(f"{delimiter}\n")
 else:
     print("No qualifying trades this run.")
 
