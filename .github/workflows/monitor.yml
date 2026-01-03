@@ -24,6 +24,7 @@ jobs:
         with:
           name: seen-hashes
           path: .
+        continue-on-error: true  # <--- This is the key addition
 
       - name: Run monitor
         run: python monitor.py
