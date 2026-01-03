@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from functools import wraps
 
 # Flexible configuration via environment variables (defaults provided)
-NEW_ACCOUNT_VALUE_THRESHOLD = int(os.getenv("NEW_ACCOUNT_THRESHOLD", "100"))
+NEW_ACCOUNT_VALUE_THRESHOLD = int(os.getenv("NEW_ACCOUNT_THRESHOLD", "10000"))
 ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "90"))
 BIG_TRADE_THRESHOLD = int(os.getenv("BIG_TRADE_THRESHOLD", "20000"))
 MAX_OTHER_TRADES = 15
