@@ -1,12 +1,12 @@
-# monitor.py (full updated - accurate proxy contract creation age via PolygonScan API)
+# monitor.py (full updated - uses Polymarket activity API for accurate first-trade age)
 
 import requests
 import os
 from datetime import datetime, timezone
 
 # THRESHOLDS
-NEW_ACCOUNT_VALUE_THRESHOLD = 100      # $10K+ for new-account alerts
-ACCOUNT_AGE_THRESHOLD_DAYS = 90           # <7 days old
+NEW_ACCOUNT_VALUE_THRESHOLD = 10000      # $10K+ for new-account alerts
+ACCOUNT_AGE_THRESHOLD_DAYS = 7           # <7 days old
 BIG_TRADE_THRESHOLD = 20000              # $20K+ to list regardless of age
 MAX_OTHER_TRADES = 15                    # Limit sports/low-interest to avoid long emails
 
@@ -19,9 +19,6 @@ EXCLUDED_KEYWORDS = [
     "boxing", "wwe", "esports", "darts", "snooker", "cycling", "olympics"
 ]
 
-MORALIS_API_KEY = os.getenv("MORALIS_API_KEY")
-POLYGONSCAN_API_KEY = os.getenv("POLYGONSCAN_API_KEY")  # Required for accurate age
-
 def get_recent_trades():
     params = {"limit": 500}
     try:
@@ -32,57 +29,29 @@ def get_recent_trades():
         print(f"Error fetching trades: {e}")
         return []
 
-def get_first_tx_timestamp(wallet):
-    # Primary: PolygonScan for proxy contract creation
-    if POLYGONSCAN_API_KEY:
-        # Step 1: Get contract creation tx hash
-        url_creation = f"https://api.polygonscan.com/api?module=contract&action=getcontractcreation&contractaddresses={wallet}&apikey={POLYGONSCAN_API_KEY}"
-        try:
-            response = requests.get(url_creation)
-            response.raise_for_status()
-            data = response.json()
-            if data.get("status") == "1" and data.get("result"):
-                creation_tx_hash = data["result"][0].get("txHash")
-                if creation_tx_hash:
-                    # Step 2: Get tx details for timestamp
-                    url_tx = f"https://api.polygonscan.com/api?module=transaction&action=gettxreceiptstatus&txhash={creation_tx_hash}&apikey={POLYGONSCAN_API_KEY}"
-                    tx_response = requests.get(url_tx)
-                    tx_response.raise_for_status()
-                    tx_data = tx_response.json()
-                    if tx_data.get("status") == "1" and tx_data.get("result"):
-                        # gettxreceiptstatus doesn't have timestamp; use txlist or block
-                        # Better: Use module=block&action=getblockbytimestamp?timestamp= closest, but instead use tx internal or fallback to txlist asc
-                        # Simplified: Use txlist asc offset=1 for the wallet, as creation is the first
-                        url_txlist = f"https://api.polygonscan.com/api?module=account&action=txlist&address={wallet}&sort=asc&page=1&offset=1&apikey={POLYGONSCAN_API_KEY}"
-                        list_response = requests.get(url_txlist)
-                        list_response.raise_for_status()
-                        list_data = list_response.json()
-                        if list_data.get("status") == "1" and list_data.get("result"):
-                            first_tx = list_data["result"][0]
-                            return int(first_tx["timeStamp"])
-            else:
-                print(f"No contract creation data for {wallet}")
-        except Exception as e:
-            print(f"PolygonScan error for {wallet}: {e}")
-
-    # Fallback: Moralis
-    if MORALIS_API_KEY:
-        headers = {"X-API-Key": MORALIS_API_KEY}
-        url = f"https://deep-index.moralis.io/api/v2.2/wallets/{wallet}/chains"
-        params = {"chains": "0x89"}
-        try:
-            response = requests.get(url, headers=headers, params=params)
-            if response.status_code == 200:
-                data = response.json()
-                for chain in data.get("active_chains", []):
-                    if chain.get("chain_id") == "0x89":
-                        first_tx = chain.get("first_transaction", {}).get("block_timestamp")
-                        if first_tx:
-                            ts_str = first_tx.replace("Z", "+00:00")
-                            return int(datetime.fromisoformat(ts_str).timestamp())
-        except Exception as e:
-            print(f"Moralis fallback error for {wallet}: {e}")
-    return None
+def get_first_trade_timestamp(wallet):
+    # Polymarket activity API - get the earliest trade (sortDirection=ASC, limit=1)
+    url = f"https://data-api.polymarket.com/activity"
+    params = {
+        "user": wallet,
+        "type": "TRADE",
+        "limit": 1,
+        "offset": 0,
+        "sortDirection": "ASC"  # Earliest first
+    }
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        if data and len(data) > 0:
+            first_activity = data[0]
+            return int(first_activity["timestamp"])
+        else:
+            print(f"No Polymarket activity found for {wallet}")
+            return None
+    except Exception as e:
+        print(f"Polymarket activity API error for {wallet}: {e}")
+        return None
 
 def is_low_interest_market(title):
     if not title:
@@ -108,14 +77,15 @@ for trade in trades:
 
     is_sports = is_low_interest_market(market_title)
 
+    # --- Big trades >$20K ---
     if value > BIG_TRADE_THRESHOLD:
         age_note = ""
-        first_ts = get_first_tx_timestamp(proxy_wallet)
+        first_ts = get_first_trade_timestamp(proxy_wallet)
         if first_ts is None:
-            age_note = " (no history - very new/low-activity)"
+            age_note = " (no Polymarket history - very new user)"
         else:
             age_days = (current_time - first_ts) / 86400
-            age_note = f" (account age: {age_days:.1f} days)"
+            age_note = f" (Polymarket age: {age_days:.1f} days)"
 
         big_trade_text = (
             f"• ${value:.2f} | Wallet: {proxy_wallet}{age_note}\n"
@@ -128,14 +98,15 @@ for trade in trades:
         else:
             big_trades_other.append(big_trade_text)
 
+    # --- New-account large trades >$10K ---
     if value > NEW_ACCOUNT_VALUE_THRESHOLD:
-        print(f"Large trade detected: ${value:.2f} by {proxy_wallet} - checking age...")
-        first_ts = get_first_tx_timestamp(proxy_wallet)
+        print(f"Large trade detected: ${value:.2f} by {proxy_wallet} - checking Polymarket age...")
+        first_ts = get_first_trade_timestamp(proxy_wallet)
         age_note = ""
         age_days = None
 
         if first_ts is None:
-            age_note = " (no transaction history detected - likely very new/low-activity proxy wallet)"
+            age_note = " (no Polymarket trade history - likely brand new user)"
             age_days = 0
         else:
             age_days = (current_time - first_ts) / 86400
@@ -152,7 +123,7 @@ for trade in trades:
                 f"Proxy Wallet Explorer: https://polygonscan.com/address/{proxy_wallet}\n"
             )
             new_account_alerts.append(alert_text)
-            print(f"MATCH FOUND: New-account large trade ${value:.2f}")
+            print(f"MATCH FOUND: New-account large trade ${value:.2f} (Polymarket age: {age_days:.1f} days)")
 
 # Build email body
 email_parts = []
@@ -165,7 +136,7 @@ if high_signal_count > 0:
     )
 
 if new_account_alerts:
-    email_parts.append("NEW ACCOUNT LARGE TRADES (> $10K from accounts <7 days old or no history)\n")
+    email_parts.append("NEW ACCOUNT LARGE TRADES (> $10K from accounts <7 days old or no Polymarket history)\n")
     email_parts.extend(new_account_alerts)
 
 if big_trades_high_value:
