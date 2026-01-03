@@ -10,9 +10,9 @@ from decimal import Decimal, InvalidOperation
 from functools import wraps
 
 # Config - lowered BIG_TRADE_THRESHOLD to capture more big bets for copy-trading
-NEW_ACCOUNT_VALUE_THRESHOLD = Decimal(os.getenv("NEW_ACCOUNT_THRESHOLD", "10000"))  # $10K+ new accounts
+BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "5000"))  # $5K+ to see lots of whale bets
+NEW_ACCOUNT_VALUE_THRESHOLD = Decimal(os.getenv("NEW_ACCOUNT_THRESHOLD", "5000"))  # Optional: lower for new users too
 ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))
-BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "10000"))  # Changed to $10K+ (was $20K)
 MAX_OTHER_TRADES = 15
 SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "21"))
 WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "14"))
