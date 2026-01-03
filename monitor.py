@@ -6,8 +6,8 @@ from datetime import datetime
 
 # Configuration (adjust thresholds if needed)
 POLYMARKET_TRADES_URL = "https://data-api.polymarket.com/trades"
-TRADE_VALUE_THRESHOLD = 10000  # $10K
-ACCOUNT_AGE_THRESHOLD_DAYS = 7
+TRADE_VALUE_THRESHOLD = 100  # $10K
+ACCOUNT_AGE_THRESHOLD_DAYS = 30
 SEEN_FILE = "seen_tx_hashes.json"  # Artifact file
 
 # Load secrets from environment
