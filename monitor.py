@@ -1,4 +1,4 @@
-# monitor.py (full updated script - adds market link)
+# monitor.py (full updated script - with sports filtering and "Things to Check" section)
 
 import requests
 import os
@@ -8,6 +8,15 @@ from datetime import datetime, timezone
 NEW_ACCOUNT_VALUE_THRESHOLD = 100      # $10K+ for new-account alerts
 ACCOUNT_AGE_THRESHOLD_DAYS = 90           # <7 days old
 BIG_TRADE_THRESHOLD = 20000              # $20K+ to list regardless of age
+
+# Sports/low-interest markets to de-prioritize (still shown, but not flagged as high-value)
+EXCLUDED_KEYWORDS = [
+    "nba", "basketball", "college basketball", "ncaab", "ncaa basketball",
+    "soccer", "football", "premier league", "la liga", "serie a", "bundesliga",
+    "champions league", "world cup", "euro", "mls", "tennis", "golf", "ufc", "mma",
+    "cricket", "rugby", "hockey", "nhl", "baseball", "mlb", "f1", "formula 1",
+    "boxing", "wwe", "esports", "darts", "snooker", "cycling", "olympics"
+]
 
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY")
 
@@ -42,12 +51,19 @@ def get_first_tx_timestamp(wallet):
         print(f"Active chains error for {wallet}: {e}")
     return None
 
+def is_low_interest_market(title):
+    if not title:
+        return False
+    title_lower = title.lower()
+    return any(keyword in title_lower for keyword in EXCLUDED_KEYWORDS)
+
 print("Starting Polymarket monitor...")
 trades = get_recent_trades()
 current_time = int(datetime.now(timezone.utc).timestamp())
 
-new_account_alerts = []   # >$10K + new account
-big_trades = []           # >$20K any account
+new_account_alerts = []      # >$10K + new account
+big_trades_high_value = []   # >$20K in high-signal markets (politics, crypto, etc.)
+big_trades_other = []        # >$20K in sports/low-interest markets
 
 for trade in trades:
     proxy_wallet = trade.get("proxyWallet")
@@ -55,11 +71,11 @@ for trade in trades:
         continue
 
     value = float(trade.get("usdcSize") or (float(trade.get("size", 0)) * float(trade.get("price", 0))))
+    market_title = trade.get("title", "")
 
-    market_slug = trade.get("slug") or trade.get("eventSlug") or "unknown"
-    market_link = f"https://polymarket.com/event/{market_slug}"
+    is_sports = is_low_interest_market(market_title)
 
-    # --- Big trades >$20K ---
+    # --- Big trades >$20K (split by interest) ---
     if value > BIG_TRADE_THRESHOLD:
         age_note = ""
         first_ts = get_first_tx_timestamp(proxy_wallet)
@@ -71,11 +87,14 @@ for trade in trades:
 
         big_trade_text = (
             f"• ${value:.2f} | Wallet: {proxy_wallet}{age_note}\n"
-            f"  Market: {trade.get('title')} ({market_link})\n"
+            f"  Market: {market_title}\n"
             f"  Side: {trade.get('side')} {trade.get('size')} shares @ ${trade.get('price')}\n"
             f"  Tx: https://polygonscan.com/tx/{trade.get('transactionHash')}\n"
         )
-        big_trades.append(big_trade_text)
+        if not is_sports:
+            big_trades_high_value.append(big_trade_text)
+        else:
+            big_trades_other.append(big_trade_text)
 
     # --- New-account large trades >$10K ---
     if value > NEW_ACCOUNT_VALUE_THRESHOLD:
@@ -96,8 +115,7 @@ for trade in trades:
                 f"Proxy Wallet: {proxy_wallet}{age_note}\n"
                 f"Trade Value: ${value:.2f} USDC\n"
                 f"Side: {trade.get('side')} {trade.get('size')} shares @ ${trade.get('price')}\n"
-                f"Market: {trade.get('title')}\n"
-                f"Market Link: {market_link}\n"
+                f"Market: {market_title}\n"
                 f"Trade Time: {datetime.fromtimestamp(trade.get('timestamp', 0), tz=timezone.utc)}\n"
                 f"Transaction: https://polygonscan.com/tx/{trade.get('transactionHash')}\n"
                 f"Proxy Wallet Explorer: https://polygonscan.com/address/{proxy_wallet}\n"
@@ -108,18 +126,30 @@ for trade in trades:
 # Build email body
 email_parts = []
 
+# Top section: Things to Check (high-signal only)
+high_signal_count = len(new_account_alerts) + len(big_trades_high_value)
+if high_signal_count > 0:
+    email_parts.append(
+        f"THINGS TO CHECK - {high_signal_count} High-Signal Activity "
+        "(Politics, Crypto, Finance, Elections, News - sports filtered out)\n"
+    )
+
 if new_account_alerts:
     email_parts.append("NEW ACCOUNT LARGE TRADES (> $10K from accounts <7 days old or no history)\n")
     email_parts.extend(new_account_alerts)
 
-if big_trades:
-    big_section = "EXTRA: ALL TRADES > $20K (any account age)\n\n" + "\n".join(big_trades)
-    email_parts.append(big_section)
+if big_trades_high_value:
+    email_parts.append("HIGH-SIGNAL TRADES > $20K\n\n" + "\n".join(big_trades_high_value))
+
+# Lower section: Other big trades (sports/low-interest)
+if big_trades_other:
+    email_parts.append("\nOTHER BIG TRADES > $20K (Sports / Low-Interest Markets)\n\n" + "\n".join(big_trades_other))
 
 # Write to GITHUB_ENV safely
 if email_parts:
     full_alert = "\n\n".join(email_parts)
-    print(f"Alerts generated ({len(new_account_alerts)} new-account + {len(big_trades)} big trades)")
+    print(f"Alerts generated: {len(new_account_alerts)} new-account + "
+          f"{len(big_trades_high_value)} high-signal big + {len(big_trades_other)} other big")
     print(full_alert)
 
     delimiter = "EOF_POLYMARKET_ALERT"
