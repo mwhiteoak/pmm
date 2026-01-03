@@ -1,4 +1,4 @@
-# monitor.py (full updated script - with sports filtering and "Things to Check" section)
+# monitor.py (full updated - improved account history via PolygonScan API)
 
 import requests
 import os
@@ -6,10 +6,11 @@ from datetime import datetime, timezone
 
 # THRESHOLDS
 NEW_ACCOUNT_VALUE_THRESHOLD = 5000      # $10K+ for new-account alerts
-ACCOUNT_AGE_THRESHOLD_DAYS = 21           # <7 days old
+ACCOUNT_AGE_THRESHOLD_DAYS = 90           # <7 days old
 BIG_TRADE_THRESHOLD = 20000              # $20K+ to list regardless of age
+MAX_OTHER_TRADES = 15                    # Limit sports/low-interest to avoid long emails
 
-# Sports/low-interest markets to de-prioritize (still shown, but not flagged as high-value)
+# Sports/low-interest keywords
 EXCLUDED_KEYWORDS = [
     "nba", "basketball", "college basketball", "ncaab", "ncaa basketball",
     "soccer", "football", "premier league", "la liga", "serie a", "bundesliga",
@@ -19,6 +20,7 @@ EXCLUDED_KEYWORDS = [
 ]
 
 MORALIS_API_KEY = os.getenv("MORALIS_API_KEY")
+POLYGONSCAN_API_KEY = os.getenv("POLYGONSCAN_API_KEY")  # New: Free key from polygonscan.com
 
 def get_recent_trades():
     params = {"limit": 500}
@@ -31,24 +33,39 @@ def get_recent_trades():
         return []
 
 def get_first_tx_timestamp(wallet):
-    if not MORALIS_API_KEY:
-        print("Missing Moralis API key")
-        return None
-    headers = {"X-API-Key": MORALIS_API_KEY}
-    url = f"https://deep-index.moralis.io/api/v2.2/wallets/{wallet}/chains"
-    params = {"chains": "0x89"}  # Polygon
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        if response.status_code == 200:
+    # Primary: PolygonScan API (more accurate for proxies/contracts)
+    if POLYGONSCAN_API_KEY:
+        url = f"https://api.polygonscan.com/api?module=account&action=txlist&address={wallet}&sort=asc&page=1&offset=1&apikey={POLYGONSCAN_API_KEY}"
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
             data = response.json()
-            for chain in data.get("active_chains", []):
-                if chain.get("chain_id") == "0x89":
-                    first_tx = chain.get("first_transaction", {}).get("block_timestamp")
-                    if first_tx:
-                        ts_str = first_tx.replace("Z", "+00:00")
-                        return int(datetime.fromisoformat(ts_str).timestamp())
-    except Exception as e:
-        print(f"Active chains error for {wallet}: {e}")
+            if data.get("status") == "1" and data.get("result"):
+                first_tx = data["result"][0]
+                return int(first_tx["timeStamp"])
+            else:
+                print(f"No txs found on PolygonScan for {wallet}")
+                return None
+        except Exception as e:
+            print(f"PolygonScan error for {wallet}: {e}")
+
+    # Fallback: Moralis (if no PolygonScan key)
+    if MORALIS_API_KEY:
+        headers = {"X-API-Key": MORALIS_API_KEY}
+        url = f"https://deep-index.moralis.io/api/v2.2/wallets/{wallet}/chains"
+        params = {"chains": "0x89"}
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                for chain in data.get("active_chains", []):
+                    if chain.get("chain_id") == "0x89":
+                        first_tx = chain.get("first_transaction", {}).get("block_timestamp")
+                        if first_tx:
+                            ts_str = first_tx.replace("Z", "+00:00")
+                            return int(datetime.fromisoformat(ts_str).timestamp())
+        except Exception as e:
+            print(f"Moralis fallback error for {wallet}: {e}")
     return None
 
 def is_low_interest_market(title):
@@ -61,9 +78,9 @@ print("Starting Polymarket monitor...")
 trades = get_recent_trades()
 current_time = int(datetime.now(timezone.utc).timestamp())
 
-new_account_alerts = []      # >$10K + new account
-big_trades_high_value = []   # >$20K in high-signal markets (politics, crypto, etc.)
-big_trades_other = []        # >$20K in sports/low-interest markets
+new_account_alerts = []
+big_trades_high_value = []
+big_trades_other = []
 
 for trade in trades:
     proxy_wallet = trade.get("proxyWallet")
@@ -75,7 +92,6 @@ for trade in trades:
 
     is_sports = is_low_interest_market(market_title)
 
-    # --- Big trades >$20K (split by interest) ---
     if value > BIG_TRADE_THRESHOLD:
         age_note = ""
         first_ts = get_first_tx_timestamp(proxy_wallet)
@@ -96,7 +112,6 @@ for trade in trades:
         else:
             big_trades_other.append(big_trade_text)
 
-    # --- New-account large trades >$10K ---
     if value > NEW_ACCOUNT_VALUE_THRESHOLD:
         print(f"Large trade detected: ${value:.2f} by {proxy_wallet} - checking age...")
         first_ts = get_first_tx_timestamp(proxy_wallet)
@@ -126,7 +141,6 @@ for trade in trades:
 # Build email body
 email_parts = []
 
-# Top section: Things to Check (high-signal only)
 high_signal_count = len(new_account_alerts) + len(big_trades_high_value)
 if high_signal_count > 0:
     email_parts.append(
@@ -141,15 +155,16 @@ if new_account_alerts:
 if big_trades_high_value:
     email_parts.append("HIGH-SIGNAL TRADES > $20K\n\n" + "\n".join(big_trades_high_value))
 
-# Lower section: Other big trades (sports/low-interest)
+# Limit other trades
 if big_trades_other:
-    email_parts.append("\nOTHER BIG TRADES > $20K (Sports / Low-Interest Markets)\n\n" + "\n".join(big_trades_other))
+    limited_other = big_trades_other[:MAX_OTHER_TRADES]
+    note = f"\n(Showing {len(limited_other)} of {len(big_trades_other)} sports/low-interest trades)" if len(big_trades_other) > MAX_OTHER_TRADES else ""
+    email_parts.append("\nOTHER BIG TRADES > $20K (Sports / Low-Interest Markets)" + note + "\n\n" + "\n".join(limited_other))
 
-# Write to GITHUB_ENV safely
+# Write safely
 if email_parts:
     full_alert = "\n\n".join(email_parts)
-    print(f"Alerts generated: {len(new_account_alerts)} new-account + "
-          f"{len(big_trades_high_value)} high-signal big + {len(big_trades_other)} other big")
+    print(f"Alerts generated (limited other trades to {MAX_OTHER_TRADES})")
     print(full_alert)
 
     delimiter = "EOF_POLYMARKET_ALERT"
