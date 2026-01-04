@@ -1,15 +1,18 @@
-# .github/workflows/monitor.yml (full updated - with websocket-client dependency)
-
+# .github/workflows/monitor.yml
 name: Polymarket Monitor
-
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Every 5 minutes
-  workflow_dispatch:  # Allows manual trigger
+    - cron: '*/5 * * * *' # Every 5 minutes
+  workflow_dispatch: # Allows manual trigger
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    env:
+      LARGE_TRADE_THRESHOLD: "25000"
+      MIN_DELTA_THRESHOLD: "4000"
+      NEW_ACCOUNT_THRESHOLD: "8000"
+      DEBUG_MODE: "true"                  # Turn to "false" once testing done
     steps:
       - uses: actions/checkout@v4
 
@@ -27,7 +30,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install requests websocket-client
+        run: pip install requests
 
       - name: Run monitor
         run: python monitor.py
