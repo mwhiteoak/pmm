@@ -1,5 +1,4 @@
-# monitor.py (full stable polling version with $10K big trade threshold)
-
+# monitor.py (modified: show $50K+ trades from any account age + keep new account $10K+ alerts)
 import requests
 import os
 import time
@@ -8,10 +7,11 @@ from pathlib import Path
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
-# Config - $10K threshold for more whale/copy-trade alerts
-NEW_ACCOUNT_VALUE_THRESHOLD = Decimal(os.getenv("NEW_ACCOUNT_THRESHOLD", "10000"))
+# Config
+NEW_ACCOUNT_VALUE_THRESHOLD = Decimal(os.getenv("NEW_ACCOUNT_THRESHOLD", "10000"))   # $10K+ for new accounts
 ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "90"))
-BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "10000"))  # $10K+ for big bets
+LARGE_TRADE_THRESHOLD = Decimal(os.getenv("LARGE_TRADE_THRESHOLD", "50000"))         # NEW: $50K+ for ANY account
+BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "10000"))            # Kept for legacy/new-account context if needed
 MAX_OTHER_TRADES = 15
 SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "21"))
 WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "14"))
@@ -36,14 +36,14 @@ def db_init(conn):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS seen_trades (
             trade_key TEXT PRIMARY KEY,
-            seen_ts   INTEGER NOT NULL
+            seen_ts INTEGER NOT NULL
         )
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS wallet_first_trade (
-            wallet         TEXT PRIMARY KEY,
+            wallet TEXT PRIMARY KEY,
             first_trade_ts INTEGER,
-            updated_ts     INTEGER NOT NULL
+            updated_ts INTEGER NOT NULL
         )
     """)
     conn.commit()
@@ -81,7 +81,7 @@ def db_prune(conn, now_ts: int):
     conn.execute("DELETE FROM wallet_first_trade WHERE updated_ts < ?", (cutoff_wallet,))
     conn.commit()
 
-def get_first_trade_timestamp(wallet):
+def get_first_trade_timestamp(wallet, conn):
     first_ts, updated_ts = db_get_wallet_first_ts(conn, wallet)
     if updated_ts is not None and (time.time() - updated_ts) < WALLET_TS_TTL_DAYS * 86400:
         return first_ts
@@ -129,16 +129,13 @@ print(f"Starting Polymarket monitor... [{datetime.now(timezone.utc).strftime('%Y
 
 conn = db_connect()
 db_init(conn)
-
 trades = get_recent_trades()
 current_time = int(datetime.now(timezone.utc).timestamp())
-
 alerts = []
 
 for trade in trades:
     tx_hash = trade.get("transactionHash")
     trade_key = tx_hash or f'{trade.get("timestamp")}:{trade.get("proxyWallet")}:{trade.get("size")}:{trade.get("price")}'
-
     if db_seen_trade(conn, trade_key):
         continue
 
@@ -147,17 +144,18 @@ for trade in trades:
         continue
 
     value = safe_decimal(trade.get("usdcSize")) or (safe_decimal(trade.get("size")) * safe_decimal(trade.get("price")))
-
     market_title = trade.get("title", "Unknown Market")
 
-    first_ts = get_first_trade_timestamp(proxy_wallet)
+    first_ts = get_first_trade_timestamp(proxy_wallet, conn)
     age_days = 0 if first_ts is None else (current_time - first_ts) / 86400
     age_note = " (brand new)" if first_ts is None else f" (age: {age_days:.1f}d)"
     is_new = (first_ts is None) or (age_days < ACCOUNT_AGE_THRESHOLD_DAYS)
 
-    tx_line = f"  Tx: https://polygonscan.com/tx/{tx_hash}\n" if tx_hash else ""
+    tx_line = f" Tx: https://polygonscan.com/tx/{tx_hash}\n" if tx_hash else ""
 
     alert_text = None
+
+    # 1. New account + >$10K trade
     if value > NEW_ACCOUNT_VALUE_THRESHOLD and is_new:
         alert_text = (
             f"ALERT: New user ${value:,.0f} bet!\n"
@@ -167,13 +165,16 @@ for trade in trades:
             f"{tx_line}"
             f"Explorer: https://polygonscan.com/address/{proxy_wallet}\n"
         )
-    elif value > BIG_TRADE_THRESHOLD:
+
+    # 2. ANY account with ≥$50K trade (new separate condition)
+    elif value >= LARGE_TRADE_THRESHOLD:
         alert_text = (
-            f"WHALE: ${value:,.0f} bet\n"
+            f"WHALE: ${value:,.0f} bet (any age account)\n"
             f"Wallet: {proxy_wallet}{age_note}\n"
             f"Market: {market_title}\n"
             f"Side: {trade.get('side')} {trade.get('size')} @ ${trade.get('price')}\n"
             f"{tx_line}"
+            f"Explorer: https://polygonscan.com/address/{proxy_wallet}\n"
         )
 
     if alert_text:
@@ -183,7 +184,7 @@ for trade in trades:
     trade_ts = int(trade.get("timestamp", current_time))
     db_mark_trade(conn, trade_key, trade_ts)
 
-# Build email
+# Build output
 if alerts:
     full_alert = "LARGE / NEW ACCOUNT TRADES\n\n" + "\n".join(alerts)
     print(full_alert)
