@@ -1,4 +1,4 @@
-# monitor.py (UPDATED Jan 2026: +Telegram alerts, +market category filter, +position delta for conviction)
+# monitor.py (Jan 2026: Email alerts + market filter + position delta conviction)
 import requests
 import os
 import time
@@ -11,13 +11,10 @@ from decimal import Decimal, InvalidOperation
 NEW_ACCOUNT_VALUE_THRESHOLD = Decimal(os.getenv("NEW_ACCOUNT_THRESHOLD", "10000"))      # >$10K new accounts
 ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "90"))
 LARGE_TRADE_THRESHOLD = Decimal(os.getenv("LARGE_TRADE_THRESHOLD", "50000"))            # ≥$50K any account
-MIN_DELTA_THRESHOLD = Decimal(os.getenv("MIN_DELTA_THRESHOLD", "10000"))                 # NEW: minimum position increase to alert
-ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "90"))
+MIN_DELTA_THRESHOLD = Decimal(os.getenv("MIN_DELTA_THRESHOLD", "10000"))                 # Min position increase to alert
 INTERESTED_KEYWORDS = os.getenv("INTERESTED_KEYWORDS", "president,election,fed,politics,macro,trump,harris").lower().split(",")
 SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "21"))
 WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "14"))
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")                                    # NEW: for push alerts
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # State
 STATE_DIR = Path(".state")
@@ -28,23 +25,85 @@ DB_PATH = STATE_DIR / "polymarket_state.sqlite"
 session = requests.Session()
 session.headers.update({"User-Agent": "PolymarketMonitor/1.0"})
 
-# NEW: Telegram send function
-def send_telegram(message: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
+# DB helpers
+def db_connect():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
+def db_init(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS seen_trades (
+            trade_key TEXT PRIMARY KEY,
+            seen_ts INTEGER NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS wallet_first_trade (
+            wallet TEXT PRIMARY KEY,
+            first_trade_ts INTEGER,
+            updated_ts INTEGER NOT NULL
+        )
+    """)
+    conn.commit()
+
+def db_seen_trade(conn, trade_key: str) -> bool:
+    row = conn.execute("SELECT 1 FROM seen_trades WHERE trade_key = ?", (trade_key,)).fetchone()
+    return row is not None
+
+def db_mark_trade(conn, trade_key: str, seen_ts: int):
+    conn.execute(
+        "INSERT OR REPLACE INTO seen_trades(trade_key, seen_ts) VALUES(?, ?)",
+        (trade_key, seen_ts)
+    )
+
+def db_get_wallet_first_ts(conn, wallet: str):
+    row = conn.execute(
+        "SELECT first_trade_ts, updated_ts FROM wallet_first_trade WHERE wallet = ?",
+        (wallet,)
+    ).fetchone()
+    if row:
+        return row[0], row[1]
+    return None, None
+
+def db_set_wallet_first_ts(conn, wallet: str, first_ts, updated_ts: int):
+    conn.execute(
+        "INSERT OR REPLACE INTO wallet_first_trade(wallet, first_trade_ts, updated_ts) VALUES(?, ?, ?)",
+        (wallet, first_ts, updated_ts)
+    )
+
+def db_prune(conn, now_ts: int):
+    cutoff_seen = now_ts - SEEN_TRADE_RETENTION_DAYS * 86400
+    cutoff_wallet = now_ts - WALLET_TS_TTL_DAYS * 86400
+    conn.execute("DELETE FROM seen_trades WHERE seen_ts < ?", (cutoff_seen,))
+    conn.execute("DELETE FROM wallet_first_trade WHERE updated_ts < ?", (cutoff_wallet,))
+    conn.commit()
+
+def get_first_trade_timestamp(wallet: str, conn) -> int | None:
+    first_ts, updated_ts = db_get_wallet_first_ts(conn, wallet)
+    if updated_ts is not None and (time.time() - updated_ts) < WALLET_TS_TTL_DAYS * 86400:
+        return first_ts
+
+    url = "https://data-api.polymarket.com/activity"
+    params = {
+        "user": wallet,
+        "type": "TRADE",
+        "limit": 1,
+        "offset": 0,
+        "sortDirection": "ASC"
+    }
     try:
-        requests.post(url, data=payload, timeout=10)
+        response = session.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        first_ts = int(data[0]["timestamp"]) if data and len(data) > 0 else None
     except Exception as e:
-        print(f"Telegram send failed: {e}")
+        print(f"Polymarket activity API error for {wallet}: {e}")
+        first_ts = None
 
-# DB helpers (unchanged except passing conn to get_first_trade_timestamp)
-# ... [keep all db_* functions as before]
-
-def get_first_trade_timestamp(wallet, conn):
-    # unchanged, but now takes conn as param
-    # ... [same as previous version]
+    db_set_wallet_first_ts(conn, wallet, first_ts, int(time.time()))
+    return first_ts
 
 def safe_decimal(val):
     try:
@@ -62,8 +121,7 @@ def get_recent_trades():
         print(f"Error fetching trades: {e}")
         return []
 
-# NEW: Get current net position size for a wallet in a specific outcome (asset)
-def get_current_position(wallet: str, asset: str):
+def get_current_position(wallet: str, asset: str) -> Decimal:
     url = "https://data-api.polymarket.com/positions"
     params = {"user": wallet, "asset": asset}
     try:
@@ -94,39 +152,37 @@ for trade in trades:
     if not proxy_wallet:
         continue
 
-    # Basic trade info
     usdc_size = safe_decimal(trade.get("usdcSize"))
     value = usdc_size or (safe_decimal(trade.get("size")) * safe_decimal(trade.get("price")))
     market_title = trade.get("title", "Unknown Market")
     market_slug = trade.get("slug", "").lower()
 
-    # 1. Market category filter (quick win - skip noise like sports/pop culture)
+    # Market filter - skip unrelated markets
     if not any(keyword in market_slug or keyword in market_title.lower() for keyword in INTERESTED_KEYWORDS):
         db_mark_trade(conn, trade_key, int(trade.get("timestamp", current_time)))
         continue
 
-    asset = trade.get("asset")  # unique outcome token ID
-    side = trade.get("side")    # BUY or SELL
+    asset = trade.get("asset")
+    side = trade.get("side")
     trade_size = safe_decimal(trade.get("size"))
 
-    # Calculate position delta
+    # Position delta calculation
     current_pos = get_current_position(proxy_wallet, asset)
     delta = trade_size if side == "BUY" else -trade_size
     new_pos = current_pos + delta
-    position_increase = delta if side == "BUY" else -trade_size  # positive for adds to long
+    position_increase = delta  # Positive when adding to position
 
-    # Age calculation
+    # Wallet age
     first_ts = get_first_trade_timestamp(proxy_wallet, conn)
     age_days = 0 if first_ts is None else (current_time - first_ts) / 86400
     age_note = " (brand new)" if first_ts is None else f" (age: {age_days:.1f}d)"
     is_new = (first_ts is None) or (age_days < ACCOUNT_AGE_THRESHOLD_DAYS)
 
-    tx_line = f" Tx: https://polygonscan.com/tx/{tx_hash}\n" if tx_hash else ""
+    tx_line = f"Tx: https://polygonscan.com/tx/{tx_hash}\n" if tx_hash else ""
     market_link = f"https://polymarket.com/event/{trade.get('eventSlug') or trade.get('slug')}"
 
     alert_text = None
 
-    # Primary alert logic - now requires meaningful position increase
     if abs(position_increase) >= MIN_DELTA_THRESHOLD:
         if value >= LARGE_TRADE_THRESHOLD:
             alert_text = (
@@ -134,7 +190,7 @@ for trade in trades:
                 f"Wallet: {proxy_wallet}{age_note}\n"
                 f"Market: {market_title}\n"
                 f"Side: {side} {trade.get('size')} @ ${trade.get('price')}\n"
-                f"New pos: ~{new_pos:,.0f} shares\n"
+                f"New position: ~{new_pos:,.0f} shares\n"
                 f"{tx_line}"
                 f"Link: {market_link}\n"
                 f"Explorer: https://polygonscan.com/address/{proxy_wallet}"
@@ -145,7 +201,7 @@ for trade in trades:
                 f"Wallet: {proxy_wallet}{age_note}\n"
                 f"Market: {market_title}\n"
                 f"Side: {side} {trade.get('size')} @ ${trade.get('price')}\n"
-                f"New pos: ~{new_pos:,.0f} shares\n"
+                f"New position: ~{new_pos:,.0f} shares\n"
                 f"{tx_line}"
                 f"Link: {market_link}\n"
                 f"Explorer: https://polygonscan.com/address/{proxy_wallet}"
@@ -154,12 +210,11 @@ for trade in trades:
     if alert_text:
         alerts.append(alert_text)
         print(f"\n{alert_text}")
-        send_telegram(alert_text)  # Instant push notification
 
     trade_ts = int(trade.get("timestamp", current_time))
     db_mark_trade(conn, trade_key, trade_ts)
 
-# Legacy GitHub output (kept for CI compatibility)
+# Output for email via GitHub Actions
 if alerts:
     full_alert = "LARGE / NEW ACCOUNT TRADES\n\n" + "\n\n".join(alerts)
     print(full_alert)
