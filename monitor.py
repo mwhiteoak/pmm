@@ -1,4 +1,4 @@
-# monitor.py (Updated: $5K+ whales + high-conviction small bets + legend + Grok links)
+# monitor.py (Clean: Only $5K+ whales • Legend at bottom • Simpler & clearer)
 import requests
 import os
 import time
@@ -8,10 +8,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote_plus
 
-# Config - Now $5K+ for whales
-BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "5000"))    # Changed to $5,000+
-SMALL_TRADE_HIGH_ODDS_THRESHOLD = Decimal("0.15")   # ≤0.15 or ≥0.85 = high conviction
-SMALL_TRADE_MIN_VALUE = Decimal("50")
+# Config
+WHALE_THRESHOLD = Decimal(os.getenv("WHALE_THRESHOLD", "5000"))  # $5,000+
 ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))
 SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "21"))
 WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "14"))
@@ -121,28 +119,23 @@ def get_recent_trades():
         print(f"Error fetching trades: {e}")
         return []
 
-# ====================== LEGEND (updated to reflect $5K threshold) ======================
+# ====================== CLEANER LEGEND (at bottom) ======================
 EMAIL_LEGEND = """
+────────────────────────────────────────────────────────────
 POLYMARKET ALERT LEGEND
 
-• WHALE = Trade of $5,000 or more (significant money moving)
+• WHALE: Any trade worth $5,000 or more in USDC — significant capital deployment.
 
-• Interesting small bet = Trade under $5K but at extreme odds:
-  - Price ≤ $0.15 or ≥ $0.85 → implies ≥85% or ≤15% probability
-  - High conviction: someone is very confident in their view
-  - These can be early signals of informed/insider knowledge
+• Price interpretation:
+  - Buying YES at $0.90 → believes ~90% chance event happens
+  - Buying NO at $0.10  → believes ~90% chance event does NOT happen
 
-• Implied probability:
-  - If buying YES at $0.90 → ~90% chance of YES
-  - If buying NO at $0.10 → equivalent to 90% confidence in NO
-  - Shown as "(XX% implied - high conviction!)" for flagged small bets
+• NEW ACCOUNT flags:
+  - (first ever seen) → this wallet has never traded on Polymarket before
+  - (X.Xd old)        → first trade was less than 7 days ago
+  → Especially noteworthy when paired with large bets
 
-• NEW ACCOUNT flag:
-  - (NEW ACCOUNT - first ever seen) = wallet never traded before
-  - (NEW ACCOUNT - X.Xd old) = first trade <7 days ago
-  - Extra noteworthy when paired with big/confident bets
-
-• Ask Grok link = one-click to grok.com with pre-filled analysis question
+• Ask Grok link: One-click to grok.com with a pre-filled question analyzing the trade
 """
 
 # ====================== MAIN ======================
@@ -154,7 +147,6 @@ db_init(conn)
 trades = get_recent_trades()
 current_time = int(datetime.now(timezone.utc).timestamp())
 whale_alerts = []
-interesting_small_alerts = []
 small_trade_count = 0
 
 print(f"Fetched {len(trades)} recent trades. Processing...\n")
@@ -193,7 +185,7 @@ for trade in trades:
         age_days = (current_time - first_ts) / 86400
         new_flag = f" (NEW ACCOUNT - {age_days:.1f}d old)"
 
-    if value >= BIG_TRADE_THRESHOLD:  # Now $5K+
+    if value >= WHALE_THRESHOLD:
         alert_text = (
             f"WHALE: ${value:,.0f} bet{new_flag}\n"
             f"Wallet: {proxy_wallet}\n"
@@ -210,38 +202,15 @@ for trade in trades:
         small_trade_count += 1
         print(f"Small trade: ${value:,.0f} | {side} {size} @ ${price} | {market_title}")
 
-        if (value >= SMALL_TRADE_MIN_VALUE and
-            (price <= SMALL_TRADE_HIGH_ODDS_THRESHOLD or price >= (Decimal("1") - SMALL_TRADE_HIGH_ODDS_THRESHOLD))):
-            
-            implied_prob = price if side == "YES" else (Decimal("1") - price)
-            implied_pct = implied_prob * 100
-            odds_note = f" ({implied_pct:.0f}% implied - high conviction!)"
-
-            small_alert = (
-                f"Interesting small bet: ${value:,.0f}{new_flag}{odds_note}\n"
-                f"Wallet: {proxy_wallet}\n"
-                f"Market: {market_title}\n"
-                f"Side: {side} {size} @ ${price}\n"
-                f"{tx_line}"
-                f"{explorer_line}"
-                f"Ask Grok: {grok_link}\n"
-            )
-            interesting_small_alerts.append(small_alert)
-
-# ====================== BUILD EMAIL WITH LEGEND ======================
-email_sections = [EMAIL_LEGEND.strip()]
+# ====================== BUILD EMAIL: Alerts first, legend last ======================
+email_lines = []
 
 if whale_alerts:
-    email_sections.append("\nWHALE ALERTS ($5K+ BETS)\n")
-    email_sections.extend(whale_alerts)
+    email_lines.append("POLYMARKET WHALE ALERTS ($5K+ BETS)\n")
+    email_lines.extend(whale_alerts)
+    email_lines.append(EMAIL_LEGEND.strip())
+    full_alert = "\n".join(email_lines)
 
-if interesting_small_alerts:
-    email_sections.append("\nINTERESTING SMALL BETS (High Conviction < $5K)\n")
-    email_sections.append("These are smaller trades at very high/low odds — potential sharp or informed signals!\n")
-    email_sections.extend(interesting_small_alerts)
-
-if len(email_sections) > 1:
-    full_alert = "\n".join(email_sections)
     print("\n" + "="*70)
     print("EMAIL WILL BE SENT:")
     print(full_alert)
@@ -253,10 +222,10 @@ if len(email_sections) > 1:
         f.write(full_alert + "\n")
         f.write(f"{delimiter}\n")
 else:
-    print("\nNo alerts this run — skipping email.")
+    print("\nNo $5K+ whale trades this run — no email sent.")
 
 if small_trade_count > 0:
-    print(f"\nLogged {small_trade_count} small trades for health check.")
+    print(f"\nLogged {small_trade_count} smaller trades for health check.")
 
 db_prune(conn, current_time)
 conn.commit()
@@ -264,7 +233,6 @@ conn.close()
 
 print(f"\n=== RUN SUMMARY [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}] ===")
 print(f"Trades analyzed: {len(trades)}")
-print(f"Whale alerts: {len(whale_alerts)}")
-print(f"Interesting small alerts: {len(interesting_small_alerts)}")
-print(f"Total small trades logged: {small_trade_count}")
+print(f"Whale alerts sent: {len(whale_alerts)}")
+print(f"Small trades logged: {small_trade_count}")
 print("Run complete.")
