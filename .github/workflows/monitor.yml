@@ -1,18 +1,15 @@
-# .github/workflows/monitor.yml
+# .github/workflows/monitor.yml (full - stable polling version with $10K threshold)
+
 name: Polymarket Monitor
+
 on:
   schedule:
-    - cron: '*/5 * * * *' # Every 5 minutes
-  workflow_dispatch: # Allows manual trigger
+    - cron: '*/5 * * * *'  # Every 5 minutes
+  workflow_dispatch:  # Manual trigger
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    env:
-      LARGE_TRADE_THRESHOLD: "25000"
-      MIN_DELTA_THRESHOLD: "4000"
-      NEW_ACCOUNT_THRESHOLD: "8000"
-      DEBUG_MODE: "true"                  # Turn to "false" once testing done
     steps:
       - uses: actions/checkout@v4
 
@@ -49,14 +46,14 @@ jobs:
           body: ${{ env.ALERTS }}
           convert_markdown: true
 
-      - name: Debug - View SQLite database (optional - remove when done)
+      - name: Debug - View SQLite database (optional - remove when satisfied)
         if: always()
         run: |
           echo "=== seen_trades table (last 20) ==="
-          sqlite3 .state/polymarket_state.sqlite "SELECT trade_key, datetime(seen_ts, 'unixepoch') FROM seen_trades ORDER BY seen_ts DESC LIMIT 20;"
+          sqlite3 .state/polymarket_state.sqlite "SELECT trade_key, datetime(seen_ts, 'unixepoch') FROM seen_trades ORDER BY seen_ts DESC LIMIT 20;" || echo "DB not created yet or empty"
           echo ""
           echo "=== wallet_first_trade table (last 20) ==="
-          sqlite3 .state/polymarket_state.sqlite "SELECT wallet, first_trade_ts, datetime(updated_ts, 'unixepoch') FROM wallet_first_trade ORDER BY updated_ts DESC LIMIT 20;"
+          sqlite3 .state/polymarket_state.sqlite "SELECT wallet, first_trade_ts, datetime(updated_ts, 'unixepoch') FROM wallet_first_trade ORDER BY updated_ts DESC LIMIT 20;" || echo "DB not created yet or empty"
           echo ""
-          echo "Total seen trades: $(sqlite3 .state/polymarket_state.sqlite 'SELECT COUNT(*) FROM seen_trades;')"
-          echo "Total wallets cached: $(sqlite3 .state/polymarket_state.sqlite 'SELECT COUNT(*) FROM wallet_first_trade;')"
+          echo "Total seen trades: $(sqlite3 .state/polymarket_state.sqlite 'SELECT COUNT(*) FROM seen_trades;' 2>/dev/null || echo 0)"
+          echo "Total wallets cached: $(sqlite3 .state/polymarket_state.sqlite 'SELECT COUNT(*) FROM wallet_first_trade;' 2>/dev/null || echo 0)"
