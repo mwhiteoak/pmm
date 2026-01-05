@@ -1,11 +1,9 @@
-# .github/workflows/monitor.yml (full - stable polling version with $10K threshold)
-
 name: Polymarket Monitor
 
 on:
   schedule:
     - cron: '*/5 * * * *'  # Every 5 minutes
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:     # Manual trigger
 
 jobs:
   monitor:
@@ -40,20 +38,20 @@ jobs:
           server_port: ${{ secrets.EMAIL_PORT }}
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: Polymarket Whale Alert - Large / New Account Trades
+          subject: Polymarket Whale Alert - $10K+ Bets (New Accounts Flagged)
           to: ${{ secrets.EMAIL_TO }}
           from: ${{ secrets.EMAIL_FROM }}
           body: ${{ env.ALERTS }}
           convert_markdown: true
 
-      - name: Debug - View SQLite database (optional - remove when satisfied)
+      - name: Debug - View SQLite database (optional)
         if: always()
         run: |
           echo "=== seen_trades table (last 20) ==="
-          sqlite3 .state/polymarket_state.sqlite "SELECT trade_key, datetime(seen_ts, 'unixepoch') FROM seen_trades ORDER BY seen_ts DESC LIMIT 20;" || echo "DB not created yet or empty"
+          sqlite3 .state/polymarket_state.sqlite "SELECT trade_key, datetime(seen_ts, 'unixepoch') FROM seen_trades ORDER BY seen_ts DESC LIMIT 20;" || echo "DB empty"
           echo ""
           echo "=== wallet_first_trade table (last 20) ==="
-          sqlite3 .state/polymarket_state.sqlite "SELECT wallet, first_trade_ts, datetime(updated_ts, 'unixepoch') FROM wallet_first_trade ORDER BY updated_ts DESC LIMIT 20;" || echo "DB not created yet or empty"
+          sqlite3 .state/polymarket_state.sqlite "SELECT wallet, first_trade_ts, datetime(updated_ts, 'unixepoch') FROM wallet_first_trade ORDER BY updated_ts DESC LIMIT 20;" || echo "DB empty"
           echo ""
           echo "Total seen trades: $(sqlite3 .state/polymarket_state.sqlite 'SELECT COUNT(*) FROM seen_trades;' 2>/dev/null || echo 0)"
           echo "Total wallets cached: $(sqlite3 .state/polymarket_state.sqlite 'SELECT COUNT(*) FROM wallet_first_trade;' 2>/dev/null || echo 0)"
