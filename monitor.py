@@ -1,4 +1,4 @@
-# monitor.py (with full explanatory legend in every email)
+# monitor.py (COMPLETE & FINAL - with legend, high-conviction small bets, Grok links)
 import requests
 import os
 import time
@@ -10,26 +10,116 @@ from urllib.parse import quote_plus
 
 # Config
 BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "10000"))
-SMALL_TRADE_HIGH_ODDS_THRESHOLD = Decimal("0.15")   # ≤15¢ or ≥85¢ = high conviction
+SMALL_TRADE_HIGH_ODDS_THRESHOLD = Decimal("0.15")   # ≤0.15 or ≥0.85 = high conviction
 SMALL_TRADE_MIN_VALUE = Decimal("50")
 ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))
 SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "21"))
 WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "14"))
 
-# State / DB / Session
+# State
 STATE_DIR = Path(".state")
 STATE_DIR.mkdir(exist_ok=True)
 DB_PATH = STATE_DIR / "polymarket_state.sqlite"
 
+# Session
 session = requests.Session()
 session.headers.update({"User-Agent": "PolymarketMonitor/1.0"})
 
-# ====================== DB HELPERS (unchanged) ======================
-# [All the same db_connect, db_init, db_seen_trade, db_mark_trade, 
-#  db_get_wallet_first_ts, db_set_wallet_first_ts, db_prune, 
-#  get_first_trade_timestamp, safe_decimal, get_recent_trades functions 
-#  from the previous complete version — they are unchanged here]
-# (Copy-paste them exactly as in the last working version)
+# ====================== DB HELPERS ======================
+def db_connect():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
+def db_init(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS seen_trades (
+            trade_key TEXT PRIMARY KEY,
+            seen_ts INTEGER NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS wallet_first_trade (
+            wallet TEXT PRIMARY KEY,
+            first_trade_ts INTEGER,
+            updated_ts INTEGER NOT NULL
+        )
+    """)
+    conn.commit()
+
+def db_seen_trade(conn, trade_key: str) -> bool:
+    row = conn.execute("SELECT 1 FROM seen_trades WHERE trade_key = ?", (trade_key,)).fetchone()
+    return row is not None
+
+def db_mark_trade(conn, trade_key: str, seen_ts: int):
+    conn.execute(
+        "INSERT OR REPLACE INTO seen_trades(trade_key, seen_ts) VALUES(?, ?)",
+        (trade_key, seen_ts)
+    )
+
+def db_get_wallet_first_ts(conn, wallet: str):
+    row = conn.execute(
+        "SELECT first_trade_ts, updated_ts FROM wallet_first_trade WHERE wallet = ?",
+        (wallet,)
+    ).fetchone()
+    if row:
+        return row[0], row[1]
+    return None, None
+
+def db_set_wallet_first_ts(conn, wallet: str, first_ts, updated_ts: int):
+    conn.execute(
+        "INSERT OR REPLACE INTO wallet_first_trade(wallet, first_trade_ts, updated_ts) VALUES(?, ?, ?)",
+        (wallet, first_ts, updated_ts)
+    )
+
+def db_prune(conn, now_ts: int):
+    cutoff_seen = now_ts - SEEN_TRADE_RETENTION_DAYS * 86400
+    cutoff_wallet = now_ts - WALLET_TS_TTL_DAYS * 86400
+    conn.execute("DELETE FROM seen_trades WHERE seen_ts < ?", (cutoff_seen,))
+    conn.execute("DELETE FROM wallet_first_trade WHERE updated_ts < ?", (cutoff_wallet,))
+    conn.commit()
+
+def get_first_trade_timestamp(wallet: str, conn):
+    first_ts, updated_ts = db_get_wallet_first_ts(conn, wallet)
+    if updated_ts is not None and (time.time() - updated_ts) < WALLET_TS_TTL_DAYS * 86400:
+        return first_ts
+
+    url = "https://data-api.polymarket.com/activity"
+    params = {
+        "user": wallet,
+        "type": "TRADE",
+        "limit": 1,
+        "offset": 0,
+        "sortDirection": "ASC"
+    }
+    try:
+        response = session.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        first_ts = int(data[0]["timestamp"]) if data else None
+    except Exception as e:
+        print(f"API error fetching first trade for {wallet}: {e}")
+        first_ts = None
+
+    db_set_wallet_first_ts(conn, wallet, first_ts, int(time.time()))
+    return first_ts
+
+def safe_decimal(val):
+    try:
+        return Decimal(str(val)) if val not in (None, "", "None") else Decimal("0")
+    except (InvalidOperation, TypeError):
+        return Decimal("0")
+
+def get_recent_trades():
+    params = {"limit": 500}
+    try:
+        response = session.get("https://data-api.polymarket.com/trades", params=params, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"Error fetching trades: {e}")
+        return []
 
 # ====================== LEGEND ======================
 EMAIL_LEGEND = """
@@ -43,17 +133,16 @@ POLYMARKET ALERT LEGEND
   - These can be early signals of informed/insider knowledge
 
 • Implied probability:
-  - If buying YES at $0.90 → market thinks ~90% chance of YES
-  - If buying NO at $0.10 → equivalent to buying YES at $0.90 (90% confidence in NO)
+  - If buying YES at $0.90 → ~90% chance of YES
+  - If buying NO at $0.10 → equivalent to 90% confidence in NO
   - Shown as "(XX% implied - high conviction!)" for flagged small bets
 
 • NEW ACCOUNT flag:
-  - (NEW ACCOUNT - first ever seen) = wallet has never traded before on Polymarket
-  - (NEW ACCOUNT - X.Xd old) = first trade was less than 7 days ago
-  - New accounts making big or highly confident bets = extra noteworthy
+  - (NEW ACCOUNT - first ever seen) = wallet never traded before
+  - (NEW ACCOUNT - X.Xd old) = first trade <7 days ago
+  - Extra noteworthy when paired with big/confident bets
 
-• Ask Grok link = one-click to grok.com with pre-filled question about the trade
-
+• Ask Grok link = one-click to grok.com with pre-filled analysis question
 """
 
 # ====================== MAIN ======================
@@ -151,7 +240,7 @@ if interesting_small_alerts:
     email_sections.append("These are smaller trades at very high/low odds — potential sharp or informed signals!\n")
     email_sections.extend(interesting_small_alerts)
 
-if len(email_sections) > 1:  # More than just the legend
+if len(email_sections) > 1:  # Has alerts beyond just legend
     full_alert = "\n".join(email_sections)
     print("\n" + "="*70)
     print("EMAIL WILL BE SENT:")
@@ -164,7 +253,7 @@ if len(email_sections) > 1:  # More than just the legend
         f.write(full_alert + "\n")
         f.write(f"{delimiter}\n")
 else:
-    print("\nNo alerts this run — only the legend would be sent, so skipping email.")
+    print("\nNo alerts this run — skipping email (legend only).")
 
 if small_trade_count > 0:
     print(f"\nLogged {small_trade_count} small trades for health check.")
