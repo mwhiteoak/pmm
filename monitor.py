@@ -1,4 +1,4 @@
-# monitor.py ( $10K+ whale alerts + optional "new account" flag )
+# monitor.py ($10K+ whale alerts + new account flag + logs small trades for health check)
 import requests
 import os
 import time
@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 
 # Config
 BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "10000"))  # $10K+
-ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))      # Consider <7 days as "new"
+ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))
 SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "21"))
 WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "14"))
 
@@ -79,11 +79,9 @@ def db_prune(conn, now_ts: int):
 
 def get_first_trade_timestamp(wallet: str, conn):
     first_ts, updated_ts = db_get_wallet_first_ts(conn, wallet)
-    # Use cached value if recent
     if updated_ts is not None and (time.time() - updated_ts) < WALLET_TS_TTL_DAYS * 86400:
         return first_ts
 
-    # Fetch from API
     url = "https://data-api.polymarket.com/activity"
     params = {
         "user": wallet,
@@ -128,6 +126,9 @@ db_init(conn)
 trades = get_recent_trades()
 current_time = int(datetime.now(timezone.utc).timestamp())
 alerts = []
+small_trade_count = 0
+
+print(f"Fetched {len(trades)} recent trades. Processing...\n")
 
 for trade in trades:
     tx_hash = trade.get("transactionHash")
@@ -141,23 +142,25 @@ for trade in trades:
         continue
 
     value = safe_decimal(trade.get("usdcSize")) or (safe_decimal(trade.get("size")) * safe_decimal(trade.get("price")))
-    
-    if value < BIG_TRADE_THRESHOLD:
-        continue  # Only care about $10K+
-
     market_title = trade.get("title", "Unknown Market")
+
+    # Log small trades (for health/check visibility)
+    if value < BIG_TRADE_THRESHOLD:
+        small_trade_count += 1
+        print(f"Small trade: ${value:,.0f} | {trade.get('side')} {trade.get('size')} @ ${trade.get('price')} | {market_title}")
+        db_mark_trade(conn, trade_key, int(trade.get("timestamp", current_time)))
+        continue
+
+    # === $10K+ Whale Trade ===
     tx_line = f" Tx: https://polygonscan.com/tx/{tx_hash}\n" if tx_hash else ""
 
     # Check if account is new
     first_ts = get_first_trade_timestamp(proxy_wallet, conn)
-    is_new = False
     new_flag = ""
     if first_ts is None:
-        is_new = True
         new_flag = " (NEW ACCOUNT - first trade ever seen)"
     elif (current_time - first_ts) / 86400 < ACCOUNT_AGE_THRESHOLD_DAYS:
         age_days = (current_time - first_ts) / 86400
-        is_new = True
         new_flag = f" (NEW ACCOUNT - {age_days:.1f} days old)"
 
     alert_text = (
@@ -170,22 +173,27 @@ for trade in trades:
     )
 
     alerts.append(alert_text)
-    print(f"\n{alert_text}")
+    print(f"\n*** ALERT ***\n{alert_text}")
 
     trade_ts = int(trade.get("timestamp", current_time))
     db_mark_trade(conn, trade_key, trade_ts)
 
-# Output / email
+# Summary
 if alerts:
     full_alert = "POLYMARKET WHALE ALERTS ($10K+ BETS)\n\n" + "\n".join(alerts)
+    print("\n" + "="*50)
     print(full_alert)
+    print("="*50)
     delimiter = "EOF_POLYMARKET_ALERT"
     with open(os.environ["GITHUB_ENV"], "a") as f:
         f.write(f"ALERTS<<{delimiter}\n")
         f.write(full_alert + "\n")
         f.write(f"{delimiter}\n")
 else:
-    print("No $10K+ trades this run.")
+    print("\nNo $10K+ whale trades this run.")
+
+if small_trade_count > 0:
+    print(f"\nLogged {small_trade_count} small trades (< $10K) - script is healthy and fetching data.")
 
 db_prune(conn, current_time)
 conn.commit()
@@ -193,5 +201,6 @@ conn.close()
 
 print(f"\n=== RUN SUMMARY [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}] ===")
 print(f"Trades analyzed: {len(trades)}")
-print(f"New alerts: {len(alerts)}")
+print(f"New whale alerts: {len(alerts)}")
+print(f"Small trades logged: {small_trade_count}")
 print("Run complete.")
