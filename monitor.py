@@ -1,4 +1,4 @@
-# monitor.py (COMPLETE & FINAL - with legend, high-conviction small bets, Grok links)
+# monitor.py (Updated: $5K+ whales + high-conviction small bets + legend + Grok links)
 import requests
 import os
 import time
@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote_plus
 
-# Config
-BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "10000"))
+# Config - Now $5K+ for whales
+BIG_TRADE_THRESHOLD = Decimal(os.getenv("BIG_TRADE_THRESHOLD", "5000"))    # Changed to $5,000+
 SMALL_TRADE_HIGH_ODDS_THRESHOLD = Decimal("0.15")   # ≤0.15 or ≥0.85 = high conviction
 SMALL_TRADE_MIN_VALUE = Decimal("50")
 ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))
@@ -121,13 +121,13 @@ def get_recent_trades():
         print(f"Error fetching trades: {e}")
         return []
 
-# ====================== LEGEND ======================
+# ====================== LEGEND (updated to reflect $5K threshold) ======================
 EMAIL_LEGEND = """
 POLYMARKET ALERT LEGEND
 
-• WHALE = Trade of $10,000 or more (big money moving)
+• WHALE = Trade of $5,000 or more (significant money moving)
 
-• Interesting small bet = Trade under $10K but at extreme odds:
+• Interesting small bet = Trade under $5K but at extreme odds:
   - Price ≤ $0.15 or ≥ $0.85 → implies ≥85% or ≤15% probability
   - High conviction: someone is very confident in their view
   - These can be early signals of informed/insider knowledge
@@ -193,7 +193,7 @@ for trade in trades:
         age_days = (current_time - first_ts) / 86400
         new_flag = f" (NEW ACCOUNT - {age_days:.1f}d old)"
 
-    if value >= BIG_TRADE_THRESHOLD:
+    if value >= BIG_TRADE_THRESHOLD:  # Now $5K+
         alert_text = (
             f"WHALE: ${value:,.0f} bet{new_flag}\n"
             f"Wallet: {proxy_wallet}\n"
@@ -232,15 +232,15 @@ for trade in trades:
 email_sections = [EMAIL_LEGEND.strip()]
 
 if whale_alerts:
-    email_sections.append("\nWHALE ALERTS ($10K+ BETS)\n")
+    email_sections.append("\nWHALE ALERTS ($5K+ BETS)\n")
     email_sections.extend(whale_alerts)
 
 if interesting_small_alerts:
-    email_sections.append("\nINTERESTING SMALL BETS (High Conviction < $10K)\n")
+    email_sections.append("\nINTERESTING SMALL BETS (High Conviction < $5K)\n")
     email_sections.append("These are smaller trades at very high/low odds — potential sharp or informed signals!\n")
     email_sections.extend(interesting_small_alerts)
 
-if len(email_sections) > 1:  # Has alerts beyond just legend
+if len(email_sections) > 1:
     full_alert = "\n".join(email_sections)
     print("\n" + "="*70)
     print("EMAIL WILL BE SENT:")
@@ -253,7 +253,7 @@ if len(email_sections) > 1:  # Has alerts beyond just legend
         f.write(full_alert + "\n")
         f.write(f"{delimiter}\n")
 else:
-    print("\nNo alerts this run — skipping email (legend only).")
+    print("\nNo alerts this run — skipping email.")
 
 if small_trade_count > 0:
     print(f"\nLogged {small_trade_count} small trades for health check.")
