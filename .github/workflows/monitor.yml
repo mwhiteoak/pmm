@@ -38,7 +38,7 @@ jobs:
           server_port: ${{ secrets.EMAIL_PORT }}
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: Polymarket Whale Alert - $10K+ Bets (New Accounts Flagged)
+          subject: Polymarket Alert
           to: ${{ secrets.EMAIL_TO }}
           from: ${{ secrets.EMAIL_FROM }}
           body: ${{ env.ALERTS }}
