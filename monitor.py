@@ -1,4 +1,4 @@
-# monitor.py (Strict $5K+ whales only • Legend at bottom • Clean & reliable)
+# monitor.py (Strict $30K+ whales only • Clean & reliable)
 import requests
 import os
 import time
@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import quote_plus
 
 # Config
-WHALE_THRESHOLD = Decimal(os.getenv("WHALE_THRESHOLD", "5000"))  # Strictly $5,000+
+WHALE_THRESHOLD = Decimal(os.getenv("WHALE_THRESHOLD", "30000"))  # Strictly $30,000+
 ACCOUNT_AGE_THRESHOLD_DAYS = int(os.getenv("ACCOUNT_AGE_DAYS", "7"))
 SEEN_TRADE_RETENTION_DAYS = int(os.getenv("SEEN_TRADE_RETENTION_DAYS", "21"))
 WALLET_TS_TTL_DAYS = int(os.getenv("WALLET_TS_TTL_DAYS", "14"))
@@ -119,22 +119,15 @@ def get_recent_trades():
         print(f"Error fetching trades: {e}")
         return []
 
-# ====================== LEGEND (placed at bottom) ======================
+# ====================== LEGEND ======================
 EMAIL_LEGEND = """
 ────────────────────────────────────────────────────────────
-POLYMARKET ALERT LEGEND
-
-• WHALE: Any trade valued at $5,000 or more — meaningful capital at risk.
-
-• Price meaning:
-  - Buying YES at $0.90 → believes ~90% chance the event will happen
-  - Buying NO at $0.10  → believes ~90% chance the event will NOT happen
-
+POLYMARKET ALERT LEGEND ($30K+ only)
+• WHALE: Any trade valued at $30,000 or more — very significant capital at risk.
 • NEW ACCOUNT flags:
   - (first ever seen) → this wallet has no prior trades on Polymarket
-  - (X.Xd old)        → first observed trade was less than 7 days ago
-  → Particularly interesting when combined with large positions
-
+  - (X.Xd old) → first observed trade was less than 7 days ago
+  → Especially interesting when combined with very large positions
 • Ask Grok link: Click to open grok.com with a ready-to-send question analyzing this trade
 """
 
@@ -146,6 +139,7 @@ db_init(conn)
 
 trades = get_recent_trades()
 current_time = int(datetime.now(timezone.utc).timestamp())
+
 whale_alerts = []
 small_trade_count = 0
 
@@ -154,10 +148,10 @@ print(f"Fetched {len(trades)} recent trades. Processing...\n")
 for trade in trades:
     tx_hash = trade.get("transactionHash")
     trade_key = tx_hash or f'{trade.get("timestamp")}:{trade.get("proxyWallet")}:{trade.get("size")}:{trade.get("price")}'
-    
+   
     if db_seen_trade(conn, trade_key):
         continue
-    
+   
     proxy_wallet = trade.get("proxyWallet")
     if not proxy_wallet:
         continue
@@ -167,21 +161,23 @@ for trade in trades:
     side = trade.get("side", "").upper()
     size = trade.get("size")
     market_title = trade.get("title", "Unknown Market")
-
     trade_ts = int(trade.get("timestamp", current_time))
+
     db_mark_trade(conn, trade_key, trade_ts)
 
-    # Console logging of small trades (for health check only — not in email)
+    # Just count & log smaller trades (no alert)
     if value < WHALE_THRESHOLD:
         small_trade_count += 1
-        print(f"Small trade: ${value:,.0f} | {side} {size} @ ${price} | {market_title}")
-        continue  # Skip to next trade — no email entry
+        if value >= 5000:  # optional: still show mid-size ones in console
+            print(f"Mid trade: ${value:,.0f} | {side} {size} @ ${price} | {market_title}")
+        continue
 
-    # === ONLY $5K+ TRADES BELOW THIS LINE ===
+    # === ONLY $30K+ TRADES BELOW THIS LINE ===
+
     tx_line = f" Tx: https://polygonscan.com/tx/{tx_hash}\n" if tx_hash else ""
     explorer_line = f"Explorer: https://polygonscan.com/address/{proxy_wallet}\n"
 
-    grok_query = f"Why might someone make this Polymarket trade? ${value:,.0f} {side} {size} @ ${price} on: {market_title}"
+    grok_query = f"Why might someone make this large Polymarket trade? ${value:,.0f} {side} {size} @ ${price} on: {market_title}"
     grok_link = f"https://grok.com/?q={quote_plus(grok_query)}"
 
     first_ts = get_first_trade_timestamp(proxy_wallet, conn)
@@ -201,13 +197,14 @@ for trade in trades:
         f"{explorer_line}"
         f"Ask Grok: {grok_link}\n"
     )
-    whale_alerts.append(alert_text)
-    print(f"\n*** WHALE ALERT ***\n{alert_text}")
 
-# ====================== BUILD EMAIL: Alerts first, legend last ======================
+    whale_alerts.append(alert_text)
+    print(f"\n*** WHALE ALERT (${value:,.0f}+) ***\n{alert_text}")
+
+# ====================== BUILD EMAIL ======================
 if whale_alerts:
     email_content = [
-        "POLYMARKET WHALE ALERTS ($5K+ BETS)\n"
+        "POLYMARKET WHALE ALERTS – $30,000+ ONLY\n"
     ]
     email_content.extend(whale_alerts)
     email_content.append(EMAIL_LEGEND.strip())
@@ -225,7 +222,7 @@ if whale_alerts:
         f.write(full_alert + "\n")
         f.write(f"{delimiter}\n")
 else:
-    print("\nNo trades ≥ $5,000 this run — no email sent.")
+    print("\nNo trades ≥ $30,000 this run — no email sent.")
 
 if small_trade_count > 0:
     print(f"\nLogged {small_trade_count} smaller trades (visible in console only).")
@@ -236,6 +233,6 @@ conn.close()
 
 print(f"\n=== RUN SUMMARY [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}] ===")
 print(f"Trades analyzed: {len(trades)}")
-print(f"Whale alerts: {len(whale_alerts)}")
-print(f"Small trades logged: {small_trade_count}")
+print(f"Whale alerts ($30K+): {len(whale_alerts)}")
+print(f"Smaller trades logged: {small_trade_count}")
 print("Run complete.")
